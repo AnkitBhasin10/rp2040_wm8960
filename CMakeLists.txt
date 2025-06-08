@@ -23,6 +23,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # initialize the SDK based on PICO_SDK_PATH
 # note: this must happen before project()
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+include($ENV{PICO_EXTRAS_PATH}/external/pico_extras_import.cmake)
 
 if (PICO_SDK_VERSION_STRING VERSION_LESS "2.1.1")
   message(FATAL_ERROR "Raspberry Pi Pico SDK version 2.1.1 (or later) required. Your version is ${PICO_SDK_VERSION_STRING}")
@@ -44,7 +45,8 @@ hardware_pio
 hardware_gpio
 hardware_clocks
 hardware_i2c
-wm8960)
+wm8960
+pico_audio_i2s)
 
 target_link_libraries(wm8960 
 pico_stdlib
