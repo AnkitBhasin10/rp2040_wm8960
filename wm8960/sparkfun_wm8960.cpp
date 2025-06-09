@@ -22,37 +22,25 @@ void WM8960::initializeCodec()
 
     enableVREF();
     enableVMID();
-
-    //input and gain to be added for microphone later
-
-    //enable ADC
     enableAdcLeft();
     enableAdcRight();
-
-    //enable DACs
     enableDacLeft();
     enableDacRight();
-
-    //enable DAC output
     enableLD2LO();
     enableRD2RO();
-
-    //enable output
     enableLI2LO();
     enableRI2RO();
-
-    //enable headphones and speakers
     enableLeftHeadphone();
     enableRightHeadphone();
     enableHeadphoneZeroCross();
     enableSpeakerZeroCross();
-
     unmuteHeadPhones();
-    setHeadphoneVolumeDB(6.0);  // or higher 
-
-    uint16_t audio_interface = 0x00;  // I2S format, 16-bit
-    writeRegister(0x07, audio_interface);
-    writeRegister(0x08, 0x01C0); // Default safe value for 44.1kHz
+    setHeadphoneVolumeDB(6.0);   
+    setSpeakerVolumeDB(6.0);
+    enableLOMIX(); 
+    enableROMIX(); 
+    setDacLeftDigitalVolumeDB(6.0);
+    setDacRightDigitalVolumeDB(6.0);
 }
 
 bool WM8960::begin(i2c_inst_t *i2cPort)

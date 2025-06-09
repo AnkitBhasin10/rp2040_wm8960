@@ -105,10 +105,6 @@ int main() {
         pio_blink_program_init(pio, led_sm, offset, 25, freq);
 
         codec.initializeCodec();
-        codec.enableDacLeft();
-        codec.enableDacRight();
-        codec.setDacLeftDigitalVolumeDB(6.0);
-        codec.setDacRightDigitalVolumeDB(6.0);
 
         for (int i = 0; i < SINE_WAVE_TABLE_LEN; i++) {
         sine_wave_table[i] = 32767 * cosf(i * 2 * (float) (M_PI / SINE_WAVE_TABLE_LEN));
