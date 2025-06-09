@@ -21,12 +21,26 @@ WM8960 codec;
 
 static int16_t sine_wave_table[SINE_WAVE_TABLE_LEN];
 
+void error_blink(int code) {
+    gpio_init(25);
+    gpio_set_dir(25, GPIO_OUT);
+    while (true) {
+        for (int i = 0; i < code; i++) {
+            gpio_put(25, 1);
+            sleep_ms(200);
+            gpio_put(25, 0);
+            sleep_ms(200);
+        }
+        sleep_ms(1000);
+    }
+}
+
 struct audio_buffer_pool *initAudio() {
 
     static audio_format_t audio_format = {
         .sample_freq = 44100,
         .format = AUDIO_BUFFER_FORMAT_PCM_S16,
-        .channel_count = 2,
+        .channel_count = 1,
     };
 
     static struct audio_buffer_format producer_format = {
@@ -37,6 +51,10 @@ struct audio_buffer_pool *initAudio() {
 
     static audio_buffer_pool *producer_pool = audio_new_producer_pool(&producer_format, 3, 
         SAMPLES_PER_BUFFER);
+
+        if(!producer_pool) {
+            error_blink(5);
+        }
 
     bool __unused ok;    
 
@@ -49,7 +67,10 @@ struct audio_buffer_pool *initAudio() {
         .pio_sm = 1
     };
 
-    audio_i2s_setup(&audio_format, &config);
+    output_format = audio_i2s_setup(&audio_format, &config);
+    if(!output_format) {
+        error_blink(10);
+    }
 
     ok = audio_i2s_connect(producer_pool);
     assert(ok);
@@ -90,6 +111,8 @@ int main() {
 
     float freq = 2500;
 
+    //error_blink(3);
+
     //pio_blink_program_init(pio, sm, offset, 25, freq); // blink default LED pin
 
     // will blink the led only if a codec is detected via i2c
@@ -101,9 +124,9 @@ int main() {
 
     sleep_ms(500);
 
-    if(codec.begin(i2c0)) {
-        pio_blink_program_init(pio, led_sm, offset, 25, freq);
-
+    // if(codec.begin(i2c0)) {
+    //     pio_blink_program_init(pio, led_sm, offset, 25, freq);
+    // }
         codec.initializeCodec();
 
         for (int i = 0; i < SINE_WAVE_TABLE_LEN; i++) {
@@ -137,7 +160,6 @@ int main() {
                 give_audio_buffer(ap, buffer);
             }
         }
-    }
 
     while (true) {
     tight_loop_contents(); // Low-power idle
