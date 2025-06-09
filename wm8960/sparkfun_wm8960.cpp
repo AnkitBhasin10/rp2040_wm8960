@@ -1,12 +1,58 @@
-#include "sparkfun_wm8960_RegisterMap.h"
+#include "sparkfun_wm8960.h"
 #include <pico/stdlib.h>
 #include "hardware/i2c.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <cmath>
 
+#define DISABLED 0b000 //disconnect all inputs
+#define MIC1 0b001 //connect Input 1 to mic amplifier in sigle-ended mode
+#define MIC2 0b011 //connect Input 1 and 2 to mic amplifier in differential mode
+#define MIC3 0b101 //connect Input 1 and 3 to mic amplifier in differential mode
+#define LINE2 0b010 //connect input 2 as a line input
+#define LINE3 0b100 //connect input 3 as a line input
+
 WM8960::WM8960() {
-  // Constructor does nothing, must call Wire.begin() from within setup()
+}
+
+void WM8960::initializeCodec()
+{
+  //reset register to default values
+    reset();
+
+    enableVREF();
+    enableVMID();
+
+    //input and gain to be added for microphone later
+
+    //enable ADC
+    enableAdcLeft();
+    enableAdcRight();
+
+    //enable DACs
+    enableDacLeft();
+    enableDacRight();
+
+    //enable DAC output
+    enableLD2LO();
+    enableRD2RO();
+
+    //enable output
+    enableLI2LO();
+    enableRI2RO();
+
+    //enable headphones and speakers
+    enableLeftHeadphone();
+    enableRightHeadphone();
+    enableHeadphoneZeroCross();
+    enableSpeakerZeroCross();
+
+    unmuteHeadPhones();
+    setHeadphoneVolumeDB(6.0);  // or higher 
+
+    uint16_t audio_interface = 0x00;  // I2S format, 16-bit
+    writeRegister(0x07, audio_interface);
+    writeRegister(0x08, 0x01C0); // Default safe value for 44.1kHz
 }
 
 bool WM8960::begin(i2c_inst_t *i2cPort)
@@ -1524,4 +1570,22 @@ uint8_t WM8960::convertDBtoSetting(float dB, float offset, float stepSize, float
   // Serial.print((uint8_t)volume);
 
   return (uint8_t)volume; // cast from float to unsigned 8-bit integer.
+}
+
+void WM8960::unmuteHeadPhones() {
+    // Read current volume register values if you have a readRegister() method,
+    // or just set with a reasonable default + clear mute bit
+
+    uint16_t left_vol = 0b000111100;  // 0d30 = ~0dB
+    uint16_t right_vol = 0b000111100; // same for right
+
+    // Set update bit (bit 8) and clear mute bit (bit 7)
+    left_vol |= (1 << 8);   // update bit
+    left_vol &= ~(1 << 7);  // clear mute bit
+
+    right_vol |= (1 << 8);   // update bit
+    right_vol &= ~(1 << 7);  // clear mute bit
+
+    writeRegister(0x02, left_vol);  // LOUT1
+    writeRegister(0x03, right_vol); // ROUT1
 }

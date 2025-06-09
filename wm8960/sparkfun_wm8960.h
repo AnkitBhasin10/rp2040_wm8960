@@ -1,23 +1,3 @@
-/******************************************************************************
-  SparkFun WM8960 PICO SDK C/C++ library
-
-  This library provides a set of functions to control (via I2C) the Wolfson 
-  Microelectronics WM8960 Stereo CODEC with 1W Stereo Class D Speaker Drivers 
-  and Headphone Drivers.
-
-    All functions return 1 if the read/write was successful, and 0
-	if there was a communications failure. You can ignore the return value
-	if you just don't care anymore.
-
-	For information on the data sent to and received from the CODEC,
-	refer to the WM8960 datasheet at:
-	https://github.com/sparkfun/SparkFun_Audio_Codec_Breakout_WM8960/blob/main/Documents/WM8960_datasheet_v4.2.pdf
-
-  This code is released under the [MIT License](http://opensource.org/licenses/MIT).
-  Please review the LICENSE.md file included with this example. If you have any questions 
-  or concerns with licensing, please contact techsupport@sparkfun.com.
-  Distributed as-is; no warranty is given.
-******************************************************************************/
 #pragma once
 #include "hardware/i2c.h"
 
@@ -307,6 +287,8 @@ class WM8960
 {
 	public:
 		WM8960();
+
+		void initializeCodec();
 		bool begin(i2c_inst_t *i2cPort = i2c0);
 		bool isConnected();
 
@@ -806,10 +788,14 @@ class WM8960
 		// General-purpose register write
 		bool writeRegister(uint8_t registerAddress, uint16_t value);
 
+		void unmuteHeadPhones();
+
 		// **The WM8960 does not support reading registers!!!
 
 	private:
 		i2c_inst_t *_i2cPort;
+		uint32_t _sampleRate;
+		int _bitsPerSample;
 		uint8_t _deviceAddress = WM8960_ADDR;
 		bool _writeRegisterBit(uint8_t registerAddress, uint8_t bitNumber, bool bitValue);
 		bool _writeRegisterMultiBits(uint8_t registerAddress, uint8_t settingMsbNum, uint8_t settingLsbNum, uint8_t setting);
