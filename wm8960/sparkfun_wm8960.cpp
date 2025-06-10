@@ -30,17 +30,25 @@ void WM8960::initializeCodec()
     enableRD2RO();
     enableLI2LO();
     enableRI2RO();
+    
+    disableDacMute();
+    unmuteHeadPhones();
+    setHeadphoneVolumeDB(1.0);
+    setSpeakerVolumeDB(1.0);
+    setDacLeftDigitalVolumeDB(1.0);
+    setDacRightDigitalVolumeDB(1.0);
+
     enableLeftHeadphone();
     enableRightHeadphone();
-    enableHeadphoneZeroCross();
-    enableSpeakerZeroCross();
-    unmuteHeadPhones();
-    setHeadphoneVolumeDB(6.0);   
-    setSpeakerVolumeDB(6.0);
-    enableLOMIX(); 
-    enableROMIX(); 
-    setDacLeftDigitalVolumeDB(6.0);
-    setDacRightDigitalVolumeDB(6.0);
+    enableLeftSpeaker();
+    enableRightSpeaker();
+
+    enableDacLeft();
+    enableDacRight();
+    enableLD2LO();
+    enableRD2RO();
+    enableLOMIX();
+    enableROMIX();
 }
 
 bool WM8960::begin(i2c_inst_t *i2cPort)
@@ -253,7 +261,7 @@ bool WM8960::pgaLeftNonInvSignalSelect(uint8_t signal)
 {
   // Clear LMP2 and LMP3
   // Necessary because the previous setting could have either set,
-  // And we don't want to confuse the codec.
+  // And we don't want to confuse the 
   // Only 1 input can be selected.
 
   // LMP3
@@ -286,7 +294,7 @@ bool WM8960::pgaRightNonInvSignalSelect(uint8_t signal)
 {
   // Clear RMP2 and RMP3
   // Necessary because the previous setting could have either set,
-  // And we don't want to confuse the codec.
+  // And we don't want to confuse the 
   // Only 1 input can be selected.
 
   // RMP3
