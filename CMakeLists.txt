@@ -34,7 +34,8 @@ project(pio_blink C CXX ASM)
 pico_sdk_init()
 
 add_library(wm8960 
-wm8960/sparkfun_wm8960.cpp)
+wm8960/sparkfun_wm8960.cpp
+wm8960/wm8960.cpp)
 
 add_executable(blinkPio blink.cpp)
 
@@ -49,13 +50,6 @@ hardware_clocks
 hardware_i2c
 wm8960
 pico_audio_i2s)
-
-target_link_libraries(wm8960 
-pico_stdlib
-hardware_pio
-hardware_gpio
-hardware_clocks
-hardware_i2c)
 
 target_link_libraries(wm8960 
 pico_stdlib
