@@ -54,6 +54,7 @@ add_library(wm8960
 add_executable(blinkPio 
   src/blink.cpp
   src/usb_descriptors.c
+  src/quirk_os_guessing.c
 )
 
 # === PIO Header ===

@@ -1,7 +1,8 @@
 /*
  * The MIT License (MIT)
  *
- * Copyright (c) 2019 Ha Thach (tinyusb.org)
+ * Copyright (c) 2020 Ha Thach (tinyusb.org)
+ * Copyright (c) 2020 Jerzy Kasenberg
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -30,6 +31,8 @@
 extern "C" {
 #endif
 
+#include "usb_descriptors.h"
+
 //--------------------------------------------------------------------+
 // Board Specific Configuration
 //--------------------------------------------------------------------+
@@ -45,7 +48,7 @@ extern "C" {
 #endif
 
 //--------------------------------------------------------------------
-// COMMON CONFIGURATION
+// Common Configuration
 //--------------------------------------------------------------------
 
 // defined by compiler flags for flexibility
@@ -54,11 +57,13 @@ extern "C" {
 #endif
 
 #ifndef CFG_TUSB_OS
-#define CFG_TUSB_OS                 OPT_OS_NONE
+#define CFG_TUSB_OS           OPT_OS_NONE
 #endif
 
+// It's recommended to disable debug unless for control requests debugging,
+// as the extra time needed will impact data stream !
 #ifndef CFG_TUSB_DEBUG
-#define CFG_TUSB_DEBUG              0
+#define CFG_TUSB_DEBUG        0
 #endif
 
 // Enable Device stack
@@ -66,9 +71,6 @@ extern "C" {
 
 // Default is max speed that hardware controller could support with on-chip PHY
 #define CFG_TUD_MAX_SPEED     BOARD_TUD_MAX_SPEED
-
-// CFG_TUSB_DEBUG is defined by compiler in DEBUG build
-// #define CFG_TUSB_DEBUG           0
 
 /* USB DMA on some MCUs can only access a specific SRAM region with restriction on alignment.
  * Tinyusb use follows macros to declare transferring memory so that they can be put
@@ -82,22 +84,43 @@ extern "C" {
 #endif
 
 #ifndef CFG_TUSB_MEM_ALIGN
-#define CFG_TUSB_MEM_ALIGN          __attribute__ ((aligned(4)))
+#define CFG_TUSB_MEM_ALIGN        __attribute__ ((aligned(4)))
 #endif
+
+/* (Needed for Full-Speed only)
+ * Enable host OS guessing to workaround UAC2 compatibility issues between Windows and OS X
+ * The default configuration only support Windows and Linux, enable this option for OS X
+ * support. Otherwise if you don't need Windows support you can make OS X's configuration as
+ * default.
+ */
+#define CFG_QUIRK_OS_GUESSING   1
 
 //--------------------------------------------------------------------
 // DEVICE CONFIGURATION
 //--------------------------------------------------------------------
 
+// Expose audio class debug information via HID interface
+#ifndef CFG_AUDIO_DEBUG
+#define CFG_AUDIO_DEBUG           1
+#endif
+
 #ifndef CFG_TUD_ENDPOINT0_SIZE
 #define CFG_TUD_ENDPOINT0_SIZE    64
 #endif
 
+#define CFG_TUD_HID_EP_BUFSIZE    64
+
 //------------- CLASS -------------//
 #define CFG_TUD_AUDIO             1
+
+#if CFG_AUDIO_DEBUG
+#define CFG_TUD_HID               1
+#else
+#define CFG_TUD_HID               0
+#endif
+
 #define CFG_TUD_CDC               0
 #define CFG_TUD_MSC               0
-#define CFG_TUD_HID               0
 #define CFG_TUD_MIDI              0
 #define CFG_TUD_VENDOR            0
 
@@ -105,19 +128,38 @@ extern "C" {
 // AUDIO CLASS DRIVER CONFIGURATION
 //--------------------------------------------------------------------
 
-// Have a look into audio_device.h for all configurations
-#define CFG_TUD_AUDIO_FUNC_1_SAMPLE_RATE                              48000
+#define CFG_TUD_AUDIO_FUNC_1_DESC_LEN                                TUD_AUDIO_SPEAKER_STEREO_FB_DESC_LEN
 
-#define CFG_TUD_AUDIO_FUNC_1_DESC_LEN                                 TUD_AUDIO_MIC_ONE_CH_DESC_LEN
-#define CFG_TUD_AUDIO_FUNC_1_N_AS_INT                                 1                                       // Number of Standard AS Interface Descriptors (4.9.1) defined per audio function - this is required to be able to remember the current alternate settings of these interfaces - We restrict us here to have a constant number for all audio functions (which means this has to be the maximum number of AS interfaces an audio function has and a second audio function with less AS interfaces just wastes a few bytes)
-#define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ                              64                                      // Size of control request buffer
+// Enable if Full-Speed on OSX, also set feedback EP size to 3
+#define CFG_TUD_AUDIO_ENABLE_FEEDBACK_FORMAT_CORRECTION              0
 
-#define CFG_TUD_AUDIO_ENABLE_EP_IN                                    1
-#define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX                    2                                       // Driver gets this info from the descriptors - we define it here to use it to setup the descriptors and to do calculations with it below
-#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX                            1                                       // Driver gets this info from the descriptors - we define it here to use it to setup the descriptors and to do calculations with it below - be aware: for different number of channels you need another descriptor!
-#define CFG_TUD_AUDIO_EP_SZ_IN                                        TUD_AUDIO_EP_SIZE(CFG_TUD_AUDIO_FUNC_1_SAMPLE_RATE, CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX, CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX)
-#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX                             CFG_TUD_AUDIO_EP_SZ_IN
-#define CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ                          (TUD_OPT_HIGH_SPEED ? 8 : 1) * CFG_TUD_AUDIO_EP_SZ_IN // Example write FIFO every 1ms, so it should be 8 times larger for HS device
+// Audio format type I specifications
+#if defined(__RX__)
+#define CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE                         48000
+#else
+#define CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE                         96000
+#endif
+
+#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX                           2
+
+// 16bit in 16bit slots
+#define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX                   2
+#define CFG_TUD_AUDIO_FUNC_1_RESOLUTION_RX                           16
+
+// EP and buffer size - for isochronous EP´s, the buffer and EP size are equal (different sizes would not make sense)
+#define CFG_TUD_AUDIO_ENABLE_EP_OUT                                  1
+
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX        TUD_AUDIO_EP_SIZE(CFG_TUD_AUDIO_FUNC_1_MAX_SAMPLE_RATE, CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX, CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX)
+#define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ     (TUD_OPT_HIGH_SPEED ? 32 : 4) * CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX // Example read FIFO every 1ms, so it should be 8 times larger for HS device
+
+// Enable feedback EP
+#define CFG_TUD_AUDIO_ENABLE_FEEDBACK_EP                             1
+
+// Number of Standard AS Interface Descriptors (4.9.1) defined per audio function - this is required to be able to remember the current alternate settings of these interfaces - We restrict us here to have a constant number for all audio functions (which means this has to be the maximum number of AS interfaces an audio function has and a second audio function with less AS interfaces just wastes a few bytes)
+#define CFG_TUD_AUDIO_FUNC_1_N_AS_INT 	                             1
+
+// Size of control request buffer
+#define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ	                         64
 
 #ifdef __cplusplus
 }
