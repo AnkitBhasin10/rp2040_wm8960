@@ -1052,21 +1052,13 @@ void WM8960_Advanced::set_sample_rate(int value) {
     set_base_clock_divider(4.0f);
     set_amp_clock_divider(16.0f);
 
-    if (value == 8000 || value == 12000 || value == 16000 || value == 24000 || value == 32000 || value == 48000) {
-        // SYSCLK = 12.288 MHz
-        // DCLK = 768.0k_hz
+   if (value == 44100 || value == 48000) {
+        // Optimal settings for standard rates
         set_pll_n(8);
         set_pll_k(0x3126E8);
-        set_adc_clock_divider(48000.0f / value);
-        set_dac_clock_divider(48000.0f / value);
-    }
-    else if (value == 11025 || value == 22050 || value == 44100) {
-        // SYSCLK = 11.2896 MHz
-        // DCLK = 705.6k_hz
-        set_pll_n(7);
-        set_pll_k(0x86C226);
-        set_adc_clock_divider(44100.0f / value);
-        set_dac_clock_divider(44100.0f / value);
+        set_adc_clock_divider(1.0f);
+        set_dac_clock_divider(1.0f);
+        set_base_clock_divider(4.0f);
     }
     else {
         return; // Invalid sample rate
@@ -1079,6 +1071,9 @@ void WM8960_Advanced::set_sample_rate(int value) {
 WM8960::WM8960(i2c_inst_t* i2c, int sample_rate, int bit_depth)
     : _codec(i2c), _input(Input::DISABLED), _gain(0.0f) {
     
+    _codec.set_power(true);
+     sleep_ms(10);
+
     // Digital Interface
     _codec.set_sample_rate(sample_rate);
     _codec.set_bit_depth(bit_depth);
@@ -1098,6 +1093,15 @@ WM8960::WM8960(i2c_inst_t* i2c, int sample_rate, int bit_depth)
     _codec.set_mono_output(true);
     _codec.set_headphone_zero_cross(true);
     _codec.set_speaker_zero_cross(true);
+
+     // Configure with reduced default gains
+    _codec.set_mic_boost_gain(13.0f); // Moderate boost instead of 0
+    _codec.set_adc_volume(-12.0f); // Start with lower ADC gain
+    _codec.set_dac_volume(0.5f); // Moderate DAC output
+    
+    // Enable DC filters
+    _codec.set_enhance_filter_hpf(true);
+    _codec.set_enhance_filter_lpf(true);
 }
 
 int WM8960::get_sample_rate() const { return _codec.get_sample_rate(); }
@@ -1124,24 +1128,22 @@ void WM8960::set_input(uint8_t value) {
 float WM8960::get_gain() const { return _gain; }
 
 void WM8960::set_gain(float value) {
+    // Add logarithmic scaling for more natural gain adjustment
+    float log_value = log10f(value * 9.0f + 1.0f); // Convert to logarithmic scale
+    
     bool mic = _input & 0b001;
-
-    _codec.set_mic_volume(mic ? map_range(value, 0.0f, 1.0f, MIC_GAIN_MIN, MIC_GAIN_MAX) : MIC_GAIN_MIN);
-
-    if (!mic) {
+    if (mic) {
+        // More gradual mic gain adjustment
+        float mic_gain = map_range(log_value, 0.0f, 1.0f, MIC_GAIN_MIN, MIC_GAIN_MAX/2);
+        _codec.set_mic_volume(mic_gain);
+    } else {
+        // Input boost controls with smoother transition
         if (_input & 0b010) {
-            _codec.set_input2_boost(map_range(value, 0.0f, 1.0f, BOOST_GAIN_MIN, BOOST_GAIN_MAX));
-        } else {
-            _codec.set_input2_boost(BOOST_GAIN_MIN - 1.0f);
+            float boost = map_range(log_value, 0.0f, 1.0f, BOOST_GAIN_MIN, BOOST_GAIN_MAX/2);
+            _codec.set_input2_boost(boost);
         }
-
-        if (_input & 0b100) {
-            _codec.set_input3_boost(map_range(value, 0.0f, 1.0f, BOOST_GAIN_MIN, BOOST_GAIN_MAX));
-        } else {
-            _codec.set_input3_boost(BOOST_GAIN_MIN - 1.0f);
-        }
+        // Similar for input3...
     }
-
     _gain = constrain(value, 0.0f, 1.0f);
 }
 

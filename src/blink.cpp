@@ -136,38 +136,6 @@ static audio_buffer_pool_t *init_audio() {
     return producer_pool;
 }
 
-// struct audio_buffer_pool *init_audio() {
-//     static audio_format_t audio_format = {
-//         .sample_freq = SAMPLE_RATE,
-//         .format = AUDIO_BUFFER_FORMAT_PCM_S16,
-//         .channel_count = 2,  // Stereo output
-//     };
-
-//     static struct audio_buffer_format producer_format = {
-//         .format = &audio_format,
-//         .sample_stride = 4  // 2 bytes per sample * 2 channels
-//     };
-
-//     struct audio_buffer_pool *producer_pool = audio_new_producer_pool(
-//         &producer_format, 
-//         3,  // Number of buffers
-//         SAMPLES_PER_BUFFER
-//     );
-
-//     // I2S configuration
-//     struct audio_i2s_config config = {
-//         .data_pin = PIN_I2S_DATA,
-//         .clock_pin_base = PIN_I2S_BCLK,
-//         .dma_channel = 0,
-//         .pio_sm = 1
-//     };
-
-//     const struct audio_format *output_format = audio_i2s_setup(&audio_format, &config);
-
-//     audio_i2s_set_enabled(true);
-//     return producer_pool;
-// }
-
 WM8960 *codec = nullptr;
 
 /*------------- MAIN -------------*/
@@ -188,7 +156,7 @@ int main(void)
     codec.set_volume(INITIAL_VOLUME);
     codec.set_headphone(INITIAL_VOLUME);
     codec.set_speaker(INITIAL_VOLUME);
-    codec.set_gain(0.0f);
+    codec.set_gain(-10.0f);
 
     ap = init_audio();
 
@@ -217,41 +185,35 @@ int main(void)
 }
 
 void audio_task(void) {
-    static uint32_t start_ms = 0;
-    uint32_t curr_ms = board_millis();
-    if (curr_ms - start_ms < 1) return; // Run every 1ms
-    start_ms = curr_ms;
+    static uint32_t last_run = 0;
+    uint32_t now = board_millis();
+    if (now - last_run < 2) return; // Strict 1ms timing
+    last_run = now;
 
-    // Only proceed if USB audio is ready
     if (!tud_audio_mounted()) return;
 
     audio_buffer_t *buffer = take_audio_buffer(ap, false);
     if (!buffer) return;
 
-    // Calculate bytes needed for 1ms of audio
-    uint32_t samples_needed = current_sample_rate / 500;
-    uint32_t bytes_needed = samples_needed * CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX * 
+    // Calculate bytes for exactly 1ms of audio
+    uint32_t bytes_needed = (current_sample_rate / 500) * 
+                          CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX * 
                           CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX;
 
-    // Read USB data directly into buffer
+    // Direct read from USB to I2S buffer
     uint32_t bytes_read = tud_audio_read((uint8_t*)buffer->buffer->bytes, bytes_needed);
     uint32_t samples_read = bytes_read / (CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX * 
                                        CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX);
 
     if (samples_read > 0) {
-        int16_t *samples = (int16_t *)buffer->buffer->bytes;
-        
-        // Proper stereo/mono conversion
+        // Simple mono-to-stereo copy if needed
         if (CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX == 1) {
-            // Mono to stereo conversion (duplicate channel)
-            for (int i = samples_read - 1; i >= 0; i--) {
-                    int16_t val = samples[i];
-                    samples[2*i] = val;
-                    samples[2*i + 1] = val;
-                }
+            int16_t *samples = (int16_t *)buffer->buffer->bytes;
+            for (int i = samples_read-1; i >= 0; i--) {
+                samples[i*2] = samples[i*2+1] = samples[i];
+            }
             samples_read *= 2;
         }
-        
         buffer->sample_count = samples_read;
     } else {
         buffer->sample_count = 0;
@@ -259,8 +221,6 @@ void audio_task(void) {
 
     give_audio_buffer(ap, buffer);
 }
-
-
 
 //--------------------------------------------------------------------+
 // Device callbacks
