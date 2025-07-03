@@ -1070,6 +1070,9 @@ void WM8960_Advanced::set_sample_rate(int value) {
 // WM8960 implementation
 WM8960::WM8960(i2c_inst_t* i2c, int sample_rate, int bit_depth)
     : _codec(i2c), _input(Input::DISABLED), _gain(0.0f) {
+
+    _codec.set_power(false);
+    sleep_ms(10);
     
     _codec.set_power(true);
      sleep_ms(10);
@@ -1284,4 +1287,24 @@ void WM8960::set_alc_time(const std::tuple<float, float, float>& value) {
     _codec.set_alc_attack_time(std::get<0>(value));
     _codec.set_alc_decay_time(std::get<1>(value));
     _codec.set_alc_hold_time(std::get<2>(value));
+}
+
+void WM8960::set_sample_rate_on_fly(uint32_t sample_rate) {
+
+    if(_codec.get_sample_rate() == sample_rate) return;
+    // Store previous state
+    bool was_enabled = _codec.get_power();
+    
+    // Power down to change clocks safely
+    _codec.set_power(false);
+    sleep_ms(10);
+    
+    // Configure new sample rate
+    _codec.set_sample_rate(sample_rate);
+    
+    // Restore power state
+    if(was_enabled) {
+        _codec.set_power(true);
+        sleep_ms(10);
+    }
 }

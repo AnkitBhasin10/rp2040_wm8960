@@ -484,6 +484,7 @@ public:
     
     std::tuple<float, float, float> get_alc_time() const;
     void set_alc_time(const std::tuple<float, float, float>& value);
+    void set_sample_rate_on_fly(uint32_t newSampleRate);
 
 private:
     WM8960_Advanced _codec;

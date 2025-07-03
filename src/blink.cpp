@@ -12,6 +12,7 @@
 #include "hardware/pio.h"
 #include "hardware/dma.h"
 #include "hardware/clocks.h"
+#include <algorithm>
 
 #ifdef CFG_QUIRK_OS_GUESSING
 #include "quirk_os_guessing.h"
@@ -23,22 +24,16 @@
 #define PIN_I2C_SCL 1
 #define LED_PIN 25
 #define INITIAL_VOLUME 4.0f
-#define SAMPLE_RATE 44100
 #define SAMPLES_PER_BUFFER 256
-#define AUDIO_BUFFER_SIZE 512   
+#define AUDIO_BUFFER_SIZE 512  
+#define INITIAL_FREQ 440.0f  
 
-//--------------------------------------------------------------------+
-// MACRO CONSTANT TYPEDEF PROTOTYPES
-//--------------------------------------------------------------------+
+const uint32_t sample_rates[] = {44100, 48000, 88200, 96000};
 
-// List of supported sample rates
-#if defined(__RX__)
-  const uint32_t sample_rates[] = {44100, 48000};
-#else
-  const uint32_t sample_rates[] = {44100, 48000, 88200, 96000};
-#endif
 
-uint32_t current_sample_rate  = 44100;
+uint32_t current_sample_rate  = 96000;
+uint32_t new_sample_rate  = 0;
+bool need_audio_reinit = false;
 
 #define N_SAMPLE_RATES  TU_ARRAY_SIZE(sample_rates)
 static int16_t sample_buffer[SAMPLES_PER_BUFFER];
@@ -83,9 +78,6 @@ static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
 int8_t mute[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1];       // +1 for master channel 0
 int16_t volume[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1];    // +1 for master channel 0
 
-// Buffer for speaker data
-uint16_t i2s_dummy_buffer[CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ/2];
-
 void led_blinking_task(void);
 void audio_task(void);
 
@@ -98,8 +90,10 @@ uint32_t fifo_count_avg;
 
 static struct audio_i2s_config config;
 static audio_buffer_pool_t *init_audio() {
+    audio_i2s_set_enabled(false);
+
     static audio_format_t audio_format = {
-        .sample_freq = SAMPLE_RATE,
+        .sample_freq = current_sample_rate,
         .format = AUDIO_BUFFER_FORMAT_PCM_S16,
         .channel_count = 2,
     };
@@ -125,18 +119,16 @@ static audio_buffer_pool_t *init_audio() {
     };
 
     output_format = audio_i2s_setup(&audio_format, &config);
-    if (!output_format) {
-        panic("PicoAudio: Unable to open audio device.\n");
-    }
 
     ok = audio_i2s_connect(producer_pool);
     assert(ok);
     audio_i2s_set_enabled(true);
 
     return producer_pool;
-}
 
-WM8960 *codec = nullptr;
+  }
+
+  WM8960* codec = nullptr;
 
 /*------------- MAIN -------------*/
 int main(void)
@@ -150,13 +142,13 @@ int main(void)
     gpio_pull_up(PIN_I2C_SCL);
 
     // Initialize codec with desired sample rate and bit depth
-    WM8960 codec(i2c0, SAMPLE_RATE, 16);
+    codec = new WM8960(i2c0, current_sample_rate, 16);
     
     // Configure audio paths and volumes
-    codec.set_volume(INITIAL_VOLUME);
-    codec.set_headphone(INITIAL_VOLUME);
-    codec.set_speaker(INITIAL_VOLUME);
-    codec.set_gain(-10.0f);
+    codec -> set_volume(INITIAL_VOLUME);
+    codec -> set_headphone(INITIAL_VOLUME);
+    codec -> set_speaker(INITIAL_VOLUME);
+    codec -> set_gain(-10.0f);
 
     ap = init_audio();
 
@@ -171,8 +163,6 @@ int main(void)
     board_init_after_tusb();
   }
 
-  TU_LOG1("Speaker running\r\n");
-
   while (1)
   {
     tud_task(); // TinyUSB device task
@@ -186,31 +176,31 @@ int main(void)
 
 void audio_task(void) {
     static uint32_t last_run = 0;
+
     uint32_t now = board_millis();
-    if (now - last_run < 2) return; // Strict 1ms timing
+    if (now - last_run < 1) return;
     last_run = now;
 
     if (!tud_audio_mounted()) return;
 
+    // Normal audio processing
     audio_buffer_t *buffer = take_audio_buffer(ap, false);
     if (!buffer) return;
 
-    // Calculate bytes for exactly 1ms of audio
-    uint32_t bytes_needed = (current_sample_rate / 500) * 
+    uint32_t bytes_needed = (current_sample_rate / 1000) * 
                           CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX * 
                           CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX;
 
-    // Direct read from USB to I2S buffer
     uint32_t bytes_read = tud_audio_read((uint8_t*)buffer->buffer->bytes, bytes_needed);
     uint32_t samples_read = bytes_read / (CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX * 
                                        CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX);
 
     if (samples_read > 0) {
-        // Simple mono-to-stereo copy if needed
         if (CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX == 1) {
             int16_t *samples = (int16_t *)buffer->buffer->bytes;
             for (int i = samples_read-1; i >= 0; i--) {
-                samples[i*2] = samples[i*2+1] = samples[i];
+                samples[2*i] = samples[i];     
+                samples[2*i + 1] = samples[i];
             }
             samples_read *= 2;
         }
@@ -277,13 +267,12 @@ static bool tud_audio_clock_get_request(uint8_t rhport, audio_control_request_t 
       {
         .wNumSubRanges = tu_htole16(N_SAMPLE_RATES)
       };
-      TU_LOG1("Clock get %d freq ranges\r\n", N_SAMPLE_RATES);
+
       for(uint8_t i = 0; i < N_SAMPLE_RATES; i++)
       {
         rangef.subrange[i].bMin = (int32_t) sample_rates[i];
         rangef.subrange[i].bMax = (int32_t) sample_rates[i];
         rangef.subrange[i].bRes = 0;
-        TU_LOG1("Range %d (%d, %d, %d)\r\n", i, (int)rangef.subrange[i].bMin, (int)rangef.subrange[i].bMax, (int)rangef.subrange[i].bRes);
       }
 
       return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &rangef, sizeof(rangef));
@@ -293,11 +282,9 @@ static bool tud_audio_clock_get_request(uint8_t rhport, audio_control_request_t 
            request->bRequest == AUDIO_CS_REQ_CUR)
   {
     audio_control_cur_1_t cur_valid = { .bCur = 1 };
-    TU_LOG1("Clock get is valid %u\r\n", cur_valid.bCur);
     return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &cur_valid, sizeof(cur_valid));
   }
-  TU_LOG1("Clock get request not supported, entity = %u, selector = %u, request = %u\r\n",
-          request->bEntityID, request->bControlSelector, request->bRequest);
+
   return false;
 }
 
@@ -313,7 +300,13 @@ static bool tud_audio_clock_set_request(uint8_t rhport, audio_control_request_t 
   {
     TU_VERIFY(request->wLength == sizeof(audio_control_cur_4_t));
 
-    current_sample_rate = (uint32_t) ((audio_control_cur_4_t const *)buf)->bCur;
+    new_sample_rate = (uint32_t) ((audio_control_cur_4_t const *)buf)->bCur;
+
+    if(new_sample_rate != current_sample_rate) {
+      current_sample_rate = new_sample_rate;
+      codec -> set_sample_rate_on_fly(current_sample_rate);
+      need_audio_reinit = true;
+    }
 
     TU_LOG1("Clock set current freq: %ld\r\n", current_sample_rate);
 
