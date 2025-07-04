@@ -28,11 +28,11 @@
 #define AUDIO_BUFFER_SIZE 512  
 #define INITIAL_FREQ 440.0f  
 
-const uint32_t sample_rates[] = {44100, 48000, 88200, 96000};
+const uint32_t sample_rates[] = {96000};
 
 
 uint32_t current_sample_rate  = 96000;
-uint32_t new_sample_rate  = 0;
+uint32_t new_sample_rate  = 96000;
 bool need_audio_reinit = false;
 
 #define N_SAMPLE_RATES  TU_ARRAY_SIZE(sample_rates)
@@ -183,6 +183,14 @@ void audio_task(void) {
 
     if (!tud_audio_mounted()) return;
 
+    if(current_sample_rate != new_sample_rate) {
+      current_sample_rate = new_sample_rate;
+      delete ap;
+      ap = nullptr;
+      sleep_ms(10);
+      ap = init_audio();
+    }
+
     // Normal audio processing
     audio_buffer_t *buffer = take_audio_buffer(ap, false);
     if (!buffer) return;
@@ -301,12 +309,7 @@ static bool tud_audio_clock_set_request(uint8_t rhport, audio_control_request_t 
     TU_VERIFY(request->wLength == sizeof(audio_control_cur_4_t));
 
     new_sample_rate = (uint32_t) ((audio_control_cur_4_t const *)buf)->bCur;
-
-    if(new_sample_rate != current_sample_rate) {
-      current_sample_rate = new_sample_rate;
-      codec -> set_sample_rate_on_fly(current_sample_rate);
-      need_audio_reinit = true;
-    }
+    codec -> set_sample_rate_on_fly(new_sample_rate);
 
     TU_LOG1("Clock set current freq: %ld\r\n", current_sample_rate);
 
