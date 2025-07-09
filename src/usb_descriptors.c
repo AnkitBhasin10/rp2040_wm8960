@@ -49,13 +49,13 @@ tusb_desc_device_t const desc_device =
 {
     .bLength            = sizeof(tusb_desc_device_t),
     .bDescriptorType    = TUSB_DESC_DEVICE,
-    .bcdUSB             = 0x0201,
+    .bcdUSB             = 0x0200,
 
     // Use Interface Association Descriptor (IAD) for Audio
     // As required by USB Specs IAD's subclass must be common class (2) and protocol must be IAD (1)
-    .bDeviceClass       = TUSB_CLASS_MISC,
-    .bDeviceSubClass    = MISC_SUBCLASS_COMMON,
-    .bDeviceProtocol    = MISC_PROTOCOL_IAD,
+    .bDeviceClass       = 0x01,
+    .bDeviceSubClass    = 0x01,
+    .bDeviceProtocol    = 0x01,
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
 
     .idVendor           = 0xCafe,
@@ -69,13 +69,52 @@ tusb_desc_device_t const desc_device =
     .bNumConfigurations = 0x01
 };
 
+uint8_t const desc_configuration_uac1[] = {
+    // Configuration Descriptor
+    0x09, 0x02, 0x6D, 0x00, 0x02, 0x01, 0x00, 0x80, 0x32,
+
+    // Audio Control Interface
+    0x09, 0x04, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x04,
+    
+    // Class-Specific AC Interface Header
+    0x09, 0x24, 0x01, 0x00, 0x01, 0x29, 0x00, 0x01, 0x01,
+    
+    // Input Terminal
+    0x0C, 0x24, 0x02, 0x01, 0x01, 0x02, 0x00, 0x01, 0x04, 0x00, 0x00, 0x00,
+    
+    // Feature Unit (FIXED)
+    0x0B, 0x24, 0x06, 0x02, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00,
+    
+    // Output Terminal
+    0x09, 0x24, 0x03, 0x03, 0x01, 0x01, 0x00, 0x02, 0x00,
+
+    // Audio Streaming Interface (Alt 0)
+    0x09, 0x04, 0x01, 0x00, 0x00, 0x01, 0x02, 0x00, 0x05,
+    
+    // Audio Streaming Interface (Alt 1)
+    0x09, 0x04, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00, 0x05,
+    
+    // Class-Specific AS Interface
+    0x07, 0x24, 0x01, 0x03, 0x00, 0x01, 0x00,
+    
+    // Format Type
+    0x0B, 0x24, 0x02, 0x01, 0x01, 0x03, 0x18, 0x01, 0x80, 0xBB, 0x00,
+    
+    // Standard Endpoint (FIXED sync type)
+    0x07, 0x05, 0x81, 0x0d, 0x90, 0x00, 0x01,
+    
+    // Class-Specific Endpoint
+    0x07, 0x25, 0x01, 0x00, 0x00, 0x00, 0x00
+};
+
+
+static_assert(sizeof(desc_configuration_uac1) == 109, 
+    "Configuration descriptor length mismatch");
+
 // Invoked when received GET DEVICE DESCRIPTOR
 // Application return pointer to descriptor
 uint8_t const * tud_descriptor_device_cb(void)
 {
-#if CFG_QUIRK_OS_GUESSING
-  quirk_os_guessing_desc_device_cb();
-#endif
   return (uint8_t const *)&desc_device;
 }
 
@@ -181,14 +220,7 @@ uint8_t const desc_configuration_osx_fs[] =
 uint8_t const * tud_descriptor_configuration_cb(uint8_t index)
 {
   (void)index; // for multiple configurations
-
-#if CFG_QUIRK_OS_GUESSING
-  quirk_os_guessing_desc_configuration_cb();
-  if(tud_speed_get() == TUSB_SPEED_FULL && quirk_os_guessing_get() == QUIRK_OS_GUESSING_OSX) {
-    return desc_configuration_osx_fs;
-  }
-#endif
-  return desc_configuration_default;
+  return desc_configuration_uac1;
 }
 
 //--------------------------------------------------------------------+
