@@ -573,11 +573,13 @@ float WM8960_Advanced::get_dac_volume() const {
 }
 
 void WM8960_Advanced::set_dac_volume(float value) {
-    uint8_t vol = round(map_range(value, DAC_VOLUME_MIN, DAC_VOLUME_MAX, 1, 255));
+    value = std::clamp(value, 0.0f, 1.0f);  // Clamp again for safety
+
+    uint8_t vol = round(map_range(value, 0.0f, 1.0f, 1.0f, 255.0f));
     _set_bits(0x0A, 0xFF, 0, vol);
     _set_bits(0x0B, 0xFF, 0, vol);
-    _set_bit(0x0A, 8, true);
-    _set_bit(0x0B, 8, true);
+    _set_bit(0x0A, 8, true);  // Update L
+    _set_bit(0x0B, 8, true);  // Update R
 }
 
 bool WM8960_Advanced::get_dac_mute() const { return _get_bit(0x05, 3); }
@@ -1188,12 +1190,15 @@ float WM8960::get_volume() const {
 }
 
 void WM8960::set_volume(float value) {
+    value = std::clamp(value, 0.0f, 1.0f);
+
     if (value <= 0.0f) {
         _codec.set_dac_mute(true);
     } else if (_codec.get_dac_mute()) {
         _codec.set_dac_mute(false);
     }
-    _codec.set_dac_volume(map_range(value, 0.0f, 1.0f, DAC_VOLUME_MIN, DAC_VOLUME_MAX));
+
+    _codec.set_dac_volume(value);
 }
 
 float WM8960::get_headphone() const {

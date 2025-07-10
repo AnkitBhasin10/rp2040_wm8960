@@ -55,7 +55,7 @@ tusb_desc_device_t const desc_device =
     // As required by USB Specs IAD's subclass must be common class (2) and protocol must be IAD (1)
     .bDeviceClass       = 0x01,
     .bDeviceSubClass    = 0x01,
-    .bDeviceProtocol    = 0x01,
+    .bDeviceProtocol    = 0x00,
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
 
     .idVendor           = 0xCafe,

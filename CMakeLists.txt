@@ -32,6 +32,8 @@ if (PICO_SDK_VERSION_STRING VERSION_LESS "2.1.1")
 endif()
 
 project(blinkPio C CXX ASM)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 pico_sdk_init()
 
 # include(FetchContent)
@@ -57,6 +59,23 @@ add_executable(blinkPio
   src/quirk_os_guessing.c
 )
 
+target_compile_definitions(blinkPio PRIVATE
+            AUDIO_FREQ_MAX=48000
+
+            # ours are zero based, so say so
+            PICO_USBDEV_USE_ZERO_BASED_INTERFACES=1
+
+            # need large descriptor
+            PICO_USBDEV_MAX_DESCRIPTOR_SIZE=256
+
+
+            PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE=1
+            PICO_USBDEV_ENABLE_DEBUG_TRAgCE
+
+            PICO_AUDIO_I2S_MONO_OUTPUT=0
+            PICO_AUDIO_I2S_MONO_INPUT=0
+    )
+
 # === PIO Header ===
 pico_generate_pio_header(blinkPio ${CMAKE_CURRENT_LIST_DIR}/pio_blink.pio)
 
@@ -71,6 +90,8 @@ target_link_libraries(blinkPio
   hardware_i2c
   wm8960
   pico_audio_i2s
+  usb_device
+  pico_multicore
 )
 
 # === Link WM8960 separately ===
@@ -94,7 +115,7 @@ target_include_directories(${PROJECT_NAME}  PRIVATE
 )
 
 pico_enable_stdio_usb(blinkPio 1)
-pico_enable_stdio_uart(blinkPio 0)
+pico_enable_stdio_uart(blinkPio 1)
 
 # === Generate UF2, HEX, etc. ===
 pico_add_extra_outputs(blinkPio)

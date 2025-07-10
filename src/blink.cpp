@@ -1,95 +1,662 @@
-#include <stdio.h>
-#include <string.h>
+/*
+ * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
 
-#include "bsp/board_api.h"
-#include "tusb.h"
-#include "usb_descriptors.h"
-#include "common_types.h"
-#include "pico/audio_i2s.h"
-#include "wm8960/wm8960.h"
+#include <cstdio>
+#include <cstdint>
+#include <cassert>
+
 #include "pico/stdlib.h"
-#include "hardware/i2c.h"
-#include "hardware/pio.h"
-#include "hardware/dma.h"
+extern "C" {
+    #include "pico/usb_device.h" 
+}
+#include "pico/audio.h"
+#include "pico/audio_i2s.h"
+#include "pico/multicore.h"
 #include "hardware/clocks.h"
-#include <algorithm>
+#include "AudioClassCommon.h"
+#include "wm8960/wm8960.h"
+#include "bsp/board_api.h"
 
-#ifdef CFG_QUIRK_OS_GUESSING
-#include "quirk_os_guessing.h"
-#endif
+// todo forget why this is using core 1 for sound: presumably not necessary
+// todo noop when muted
 
-#define PIN_I2S_DATA 9
-#define PIN_I2S_BCLK 10
+// modification for USB-sound rate feedback and mute
+#define USB_FEEDBACK 1 // USB-audio rate feedback using buffer status
+#define MUTE_CMD 1 // mute command
+
+// connected pins from RPi to DAC
+#undef PICO_AUDIO_I2S_DATA_PIN
+#define PICO_AUDIO_I2S_DATA_PIN 9
+#undef PICO_AUDIO_I2S_CLOCK_PIN_BASE
+#define PICO_AUDIO_I2S_CLOCK_PIN_BASE 10
+////////////////////////////////////////
+
 #define PIN_I2C_SDA 0
 #define PIN_I2C_SCL 1
-#define LED_PIN 25
-#define INITIAL_VOLUME 4.0f
-#define SAMPLES_PER_BUFFER 256
-#define AUDIO_BUFFER_SIZE 512  
-#define INITIAL_FREQ 440.0f  
+#define INITIAL_VOLUME 1.0f
+#define current_sample_rate 48000
 
-const uint32_t sample_rates[] = {96000};
+CU_REGISTER_DEBUG_PINS(audio_timing)
 
+// ---- select at most one ---
+//CU_SELECT_DEBUG_PINS(audio_timing)
 
-uint32_t current_sample_rate  = 96000;
-uint32_t new_sample_rate  = 96000;
-bool need_audio_reinit = false;
+// todo make descriptor strings should probably belong to the configs
+static const char *descriptor_strings[] =
+        {
+                "Raspberry Pi",
+                "Pico Sound Card",
+                "0123456789AB"
+        };
 
-#define N_SAMPLE_RATES  TU_ARRAY_SIZE(sample_rates)
-static int16_t sample_buffer[SAMPLES_PER_BUFFER];
-static audio_buffer_pool_t *ap;
-static int16_t audio_buffer[AUDIO_BUFFER_SIZE];
-static uint32_t audio_buffer_pos = 0;
+// todo fix these
+#define VENDOR_ID   0x2e8au
+#define PRODUCT_ID  0xfeddu
 
-/* Blink pattern
- * - 25 ms   : streaming data
- * - 250 ms  : device not mounted
- * - 1000 ms : device mounted
- * - 2500 ms : device is suspended
- */
-enum
-{
-  BLINK_STREAMING = 25,
-  BLINK_NOT_MOUNTED = 250,
-  BLINK_MOUNTED = 1000,
-  BLINK_SUSPENDED = 2500,
-};
+#define AUDIO_OUT_ENDPOINT  0x01U
+#define AUDIO_IN_ENDPOINT   0x82U
 
-enum
-{
-  VOLUME_CTRL_0_DB = 0,
-  VOLUME_CTRL_10_DB = 2560,
-  VOLUME_CTRL_20_DB = 5120,
-  VOLUME_CTRL_30_DB = 7680,
-  VOLUME_CTRL_40_DB = 10240,
-  VOLUME_CTRL_50_DB = 12800,
-  VOLUME_CTRL_60_DB = 15360,
-  VOLUME_CTRL_70_DB = 17920,
-  VOLUME_CTRL_80_DB = 20480,
-  VOLUME_CTRL_90_DB = 23040,
-  VOLUME_CTRL_100_DB = 25600,
-  VOLUME_CTRL_SILENCE = 0x8000,
-};
+#undef AUDIO_SAMPLE_FREQ
+#define AUDIO_SAMPLE_FREQ(frq) (uint8_t)(frq), (uint8_t)((frq >> 8)), (uint8_t)((frq >> 16))
 
-static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
+#if USB_FEEDBACK
+// when USB-audio feedback applies, it receives upto 49 samples in each packet
+#define AUDIO_MAX_PACKET_SIZE(freq) (uint8_t)(((freq + 1999) / 1000) * 4)
+#else
+#define AUDIO_MAX_PACKET_SIZE(freq) (uint8_t)(((freq + 999) / 1000) * 4)
+#endif
+#define FEATURE_MUTE_CONTROL 1u
+#define FEATURE_VOLUME_CONTROL 2u
 
-// Audio controls
-// Current states
-int8_t mute[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1];       // +1 for master channel 0
-int16_t volume[CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1];    // +1 for master channel 0
+#define ENDPOINT_FREQ_CONTROL 1u
 
-void led_blinking_task(void);
 void audio_task(void);
 
-#if CFG_AUDIO_DEBUG
-void audio_debug_task(void);
-uint8_t current_alt_settings;
-uint16_t fifo_count;
-uint32_t fifo_count_avg;
+struct audio_device_config {
+    struct usb_configuration_descriptor descriptor;
+    struct usb_interface_descriptor ac_interface;
+    struct __attribute__((packed)) {
+        USB_Audio_StdDescriptor_Interface_AC_t core;
+        USB_Audio_StdDescriptor_InputTerminal_t input_terminal;
+        USB_Audio_StdDescriptor_FeatureUnit_t feature_unit;
+        USB_Audio_StdDescriptor_OutputTerminal_t output_terminal;
+    } ac_audio;
+    struct usb_interface_descriptor as_zero_interface;
+    struct usb_interface_descriptor as_op_interface;
+    struct __attribute__((packed)) {
+        USB_Audio_StdDescriptor_Interface_AS_t streaming;
+        struct __attribute__((packed)) {
+            USB_Audio_StdDescriptor_Format_t core;
+            USB_Audio_SampleFreq_t freqs[2];
+        } format;
+    } as_audio;
+    struct __attribute__((packed)) {
+        struct usb_endpoint_descriptor_long core;
+        USB_Audio_StdDescriptor_StreamEndpoint_Spc_t audio;
+    } ep1;
+    struct usb_endpoint_descriptor_long ep2;
+};
+
+static const struct audio_device_config audio_device_config = {
+        .descriptor = {
+                .bLength             = sizeof(audio_device_config.descriptor),
+                .bDescriptorType     = DTYPE_Configuration,
+                .wTotalLength        = sizeof(audio_device_config),
+                .bNumInterfaces      = 2,
+                .bConfigurationValue = 0x01,
+                .iConfiguration      = 0x00,
+                .bmAttributes        = 0x80,
+                .bMaxPower           = 0x32,
+        },
+        .ac_interface = {
+                .bLength            = sizeof(audio_device_config.ac_interface),
+                .bDescriptorType    = DTYPE_Interface,
+                .bInterfaceNumber   = 0x00,
+                .bAlternateSetting  = 0x00,
+                .bNumEndpoints      = 0x00,
+                .bInterfaceClass    = AUDIO_CSCP_AudioClass,
+                .bInterfaceSubClass = AUDIO_CSCP_ControlSubclass,
+                .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
+                .iInterface         = 0x00,
+        },
+        .ac_audio = {
+                .core = {
+                        .bLength = sizeof(audio_device_config.ac_audio.core),
+                        .bDescriptorType = AUDIO_DTYPE_CSInterface,
+                        .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_Header,
+                        .bcdADC = VERSION_BCD(1, 0, 0),
+                        .wTotalLength = sizeof(audio_device_config.ac_audio),
+                        .bInCollection = 1,
+                        .bInterfaceNumbers = 1,
+                },
+                .input_terminal = {
+                        .bLength = sizeof(audio_device_config.ac_audio.input_terminal),
+                        .bDescriptorType = AUDIO_DTYPE_CSInterface,
+                        .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_InputTerminal,
+                        .bTerminalID = 1,
+                        .wTerminalType = AUDIO_TERMINAL_STREAMING,
+                        .bAssocTerminal = 0,
+                        .bNrChannels = 2,
+                        .wChannelConfig = AUDIO_CHANNEL_LEFT_FRONT | AUDIO_CHANNEL_RIGHT_FRONT,
+                        .iChannelNames = 0,
+                        .iTerminal = 0,
+                },
+                .feature_unit = {
+                        .bLength = sizeof(audio_device_config.ac_audio.feature_unit),
+                        .bDescriptorType = AUDIO_DTYPE_CSInterface,
+                        .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_Feature,
+                        .bUnitID = 2,
+                        .bSourceID = 1,
+                        .bControlSize = 1,
+                        .bmaControls = {AUDIO_FEATURE_MUTE | AUDIO_FEATURE_VOLUME, 0, 0},
+                        .iFeature = 0,
+                },
+                .output_terminal = {
+                        .bLength = sizeof(audio_device_config.ac_audio.output_terminal),
+                        .bDescriptorType = AUDIO_DTYPE_CSInterface,
+                        .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_OutputTerminal,
+                        .bTerminalID = 3,
+                        .wTerminalType = AUDIO_TERMINAL_OUT_SPEAKER,
+                        .bAssocTerminal = 0,
+                        .bSourceID = 2,
+                        .iTerminal = 0,
+                },
+        },
+        .as_zero_interface = {
+                .bLength            = sizeof(audio_device_config.as_zero_interface),
+                .bDescriptorType    = DTYPE_Interface,
+                .bInterfaceNumber   = 0x01,
+                .bAlternateSetting  = 0x00,
+                .bNumEndpoints      = 0x00,
+                .bInterfaceClass    = AUDIO_CSCP_AudioClass,
+                .bInterfaceSubClass = AUDIO_CSCP_AudioStreamingSubclass,
+                .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
+                .iInterface         = 0x00,
+        },
+        .as_op_interface = {
+                .bLength            = sizeof(audio_device_config.as_op_interface),
+                .bDescriptorType    = DTYPE_Interface,
+                .bInterfaceNumber   = 0x01,
+                .bAlternateSetting  = 0x01,
+                .bNumEndpoints      = 0x02,
+                .bInterfaceClass    = AUDIO_CSCP_AudioClass,
+                .bInterfaceSubClass = AUDIO_CSCP_AudioStreamingSubclass,
+                .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
+                .iInterface         = 0x00,
+        },
+        .as_audio = {
+                .streaming = {
+                        .bLength = sizeof(audio_device_config.as_audio.streaming),
+                        .bDescriptorType = AUDIO_DTYPE_CSInterface,
+                        .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_General,
+                        .bTerminalLink = 1,
+                        .bDelay = 1,
+                        .wFormatTag = 1, // PCM
+                },
+                .format = {
+                        .core = {
+                                .bLength = sizeof(audio_device_config.as_audio.format),
+                                .bDescriptorType = AUDIO_DTYPE_CSInterface,
+                                .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_FormatType,
+                                .bFormatType = 1,
+                                .bNrChannels = 2,
+                                .bSubFrameSize = 2,
+                                .bBitResolution = 16,
+                                .bSampleFrequencyType = count_of(audio_device_config.as_audio.format.freqs),
+                        },
+                        .freqs = {
+                                AUDIO_SAMPLE_FREQ(48000)
+                        },
+                },
+        },
+        .ep1 = {
+                .core = {
+                        .bLength          = sizeof(audio_device_config.ep1.core),
+                        .bDescriptorType  = DTYPE_Endpoint,
+                        .bEndpointAddress = AUDIO_OUT_ENDPOINT,
+                        .bmAttributes     = 5,
+                        .wMaxPacketSize   = AUDIO_MAX_PACKET_SIZE(current_sample_rate),
+                        .bInterval        = 1,
+                        .bRefresh         = 0,
+                        .bSyncAddr        = AUDIO_IN_ENDPOINT,
+                },
+                .audio = {
+                        .bLength = sizeof(audio_device_config.ep1.audio),
+                        .bDescriptorType = AUDIO_DTYPE_CSEndpoint,
+                        .bDescriptorSubtype = AUDIO_DSUBTYPE_CSEndpoint_General,
+                        .bmAttributes = 1,
+                        .bLockDelayUnits = 0,
+                        .wLockDelay = 0,
+                }
+        },
+        .ep2 = {
+                .bLength          = sizeof(audio_device_config.ep2),
+                .bDescriptorType  = 0x05,
+                .bEndpointAddress = AUDIO_IN_ENDPOINT,
+                .bmAttributes     = 0x11,
+                .wMaxPacketSize   = 3,
+                .bInterval        = 0x01,
+                .bRefresh         = 2,
+                .bSyncAddr        = 0,
+        },
+};
+
+static struct usb_interface ac_interface;
+static struct usb_interface as_op_interface;
+static struct usb_endpoint ep_op_out, ep_op_sync;
+
+static const struct usb_device_descriptor boot_device_descriptor = {
+        .bLength            = 18,
+        .bDescriptorType    = 0x01,
+        .bcdUSB             = 0x0110,
+        .bDeviceClass       = 0x00,
+        .bDeviceSubClass    = 0x00,
+        .bDeviceProtocol    = 0x00,
+        .bMaxPacketSize0    = 0x40,
+        .idVendor           = VENDOR_ID,
+        .idProduct          = PRODUCT_ID,
+        .bcdDevice          = 0x0200,
+        .iManufacturer      = 0x01,
+        .iProduct           = 0x02,
+        .iSerialNumber      = 0x03,
+        .bNumConfigurations = 0x01,
+};
+
+const char *_get_descriptor_string(uint index) {
+    if (index <= count_of(descriptor_strings)) {
+        return descriptor_strings[index - 1];
+    } else {
+        return "";
+    }
+}
+
+static struct {
+    uint32_t freq;
+    int16_t volume;
+    int16_t vol_mul;
+    bool mute;
+} audio_state = {
+        .freq = current_sample_rate,
+};
+
+static struct audio_buffer_pool *producer_pool;
+
+#if USB_FEEDBACK
+#define BUFFER_NUM 16 // number of buffer
+
+//for USB-audio rate feedback, number of vacant buffers is used
+static int countFreeBuffers() {
+  int i = 0;
+  
+  audio_buffer_t *audio_buffer = producer_pool->free_list;
+  while(audio_buffer != nullptr) {
+    audio_buffer = audio_buffer->next;
+    i++;
+  }
+  return i;
+}
 #endif
 
+static void _as_audio_packet(struct usb_endpoint *ep) {
+    assert(ep->current_transfer);
+
+    // 1. Buffer acquisition with timeout protection (non-blocking)
+    struct usb_buffer *usb_buffer = usb_current_out_packet_buffer(ep);
+    struct audio_buffer *audio_buffer = take_audio_buffer(producer_pool, false);
+    if (!audio_buffer) {
+        static uint32_t underrun_count = 0;
+        if (++underrun_count % 100 == 0) {
+            printf("Warning: Audio buffer underrun (%d)\n", underrun_count);
+        }
+        usb_grow_transfer(ep->current_transfer, 1);
+        usb_packet_done(ep);
+        return;
+    }
+
+    // 2. Calculate sample count (16-bit stereo = 4 bytes per sample)
+    const uint32_t sample_count = usb_buffer->data_len / 4;
+    audio_buffer->sample_count = sample_count;
+
+    // 4. Get buffer pointers with cache alignment
+    __attribute__((aligned(4))) int16_t *out = (int16_t *)audio_buffer->buffer->bytes;
+    __attribute__((aligned(4))) const int16_t *in = (const int16_t *)usb_buffer->data;
+
+    // 5. High-quality transfer with DC offset correction
+    static int32_t dc_offset = 0;
+    for (uint32_t i = 0; i < sample_count * 2; i++) {
+        // DC offset removal (high-pass filter)
+        int32_t sample = in[i];
+        dc_offset = (dc_offset * 31 + sample) / 32;
+        out[i] = (int16_t)(sample - dc_offset);
+        
+        // Soft clipping to prevent distortion
+        if (out[i] > 32760) out[i] = 32760;
+        if (out[i] < -32760) out[i] = -32760;
+    }
+
+    // 6. Buffer submission with timing optimization
+    give_audio_buffer(producer_pool, audio_buffer);
+    usb_grow_transfer(ep->current_transfer, 1);
+    usb_packet_done(ep);
+}
+
+static void _as_sync_packet(struct usb_endpoint *ep) {
+    assert(ep->current_transfer);
+    DEBUG_PINS_SET(audio_timing, 2);
+    DEBUG_PINS_CLR(audio_timing, 2);
+    struct usb_buffer *buffer = usb_current_in_packet_buffer(ep);
+    assert(buffer->data_max >= 3);
+    buffer->data_len = 3;
+
+#if USB_FEEDBACK
+    // calc rate adjustment value between -40 to 40
+    int feedbackvalue = (countFreeBuffers() - BUFFER_NUM / 2) * (2 * 40 / BUFFER_NUM);
+    uint feedback = ((audio_state.freq + feedbackvalue) << 14u) / 1000u;
+#else
+    // todo lie thru our teeth for now
+    uint feedback = (audio_state.freq << 14u) / 1000u;
+#endif
+
+    buffer->data[0] = feedback;
+    buffer->data[1] = feedback >> 8u;
+    buffer->data[2] = feedback >> 16u;
+
+    // keep on truckin'
+    usb_grow_transfer(ep->current_transfer, 1);
+    usb_packet_done(ep);
+}
+
+static const struct usb_transfer_type as_transfer_type = {
+        .on_packet = _as_audio_packet,
+        .initial_packet_count = 1,
+};
+
+static const struct usb_transfer_type as_sync_transfer_type = {
+        .on_packet = _as_sync_packet,
+        .initial_packet_count = 1,
+};
+
+static struct usb_transfer as_transfer;
+static struct usb_transfer as_sync_transfer;
+
+static bool do_get_current(struct usb_setup_packet *setup) {
+    usb_debug("AUDIO_REQ_GET_CUR\n");
+
+    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
+        switch (setup->wValue >> 8u) {
+            case FEATURE_MUTE_CONTROL: {
+                usb_start_tiny_control_in_transfer(audio_state.mute, 1);
+                return true;
+            }
+            case FEATURE_VOLUME_CONTROL: {
+                /* Current volume. See UAC Spec 1.0 p.77 */
+                usb_start_tiny_control_in_transfer(audio_state.volume, 2);
+                return true;
+            }
+        }
+    } else if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_ENDPOINT) {
+        if ((setup->wValue >> 8u) == ENDPOINT_FREQ_CONTROL) {
+            /* Current frequency */
+            usb_start_tiny_control_in_transfer(audio_state.freq, 3);
+            return true;
+        }
+    }
+    return false;
+}
+
+// todo this seemed like aood guess, but is not correct
+static const uint16_t db_to_vol[91] = {
+        0x0001, 0x0001, 0x0001, 0x0001, 0x0001, 0x0001, 0x0002, 0x0002,
+        0x0002, 0x0002, 0x0003, 0x0003, 0x0004, 0x0004, 0x0005, 0x0005,
+        0x0006, 0x0007, 0x0008, 0x0009, 0x000a, 0x000b, 0x000d, 0x000e,
+        0x0010, 0x0012, 0x0014, 0x0017, 0x001a, 0x001d, 0x0020, 0x0024,
+        0x0029, 0x002e, 0x0033, 0x003a, 0x0041, 0x0049, 0x0052, 0x005c,
+        0x0067, 0x0074, 0x0082, 0x0092, 0x00a4, 0x00b8, 0x00ce, 0x00e7,
+        0x0104, 0x0124, 0x0147, 0x016f, 0x019c, 0x01ce, 0x0207, 0x0246,
+        0x028d, 0x02dd, 0x0337, 0x039b, 0x040c, 0x048a, 0x0518, 0x05b7,
+        0x066a, 0x0732, 0x0813, 0x090f, 0x0a2a, 0x0b68, 0x0ccc, 0x0e5c,
+        0x101d, 0x1214, 0x1449, 0x16c3, 0x198a, 0x1ca7, 0x2026, 0x2413,
+        0x287a, 0x2d6a, 0x32f5, 0x392c, 0x4026, 0x47fa, 0x50c3, 0x5a9d,
+        0x65ac, 0x7214, 0x7fff
+};
+
+// actually windows doesn't seem to like this in the middle, so set top range to 0db
+#define CENTER_VOLUME_INDEX 91
+
+#define ENCODE_DB(x) ((uint16_t)(int16_t)((x)*256))
+
+#define MIN_VOLUME           ENCODE_DB(-CENTER_VOLUME_INDEX)
+#define DEFAULT_VOLUME       ENCODE_DB(0)
+#define MAX_VOLUME           ENCODE_DB(count_of(db_to_vol)-CENTER_VOLUME_INDEX)
+#define VOLUME_RESOLUTION    ENCODE_DB(1)
+
+static bool do_get_minimum(struct usb_setup_packet *setup) {
+    usb_debug("AUDIO_REQ_GET_MIN\n");
+    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
+        switch (setup->wValue >> 8u) {
+            case FEATURE_VOLUME_CONTROL: {
+                usb_start_tiny_control_in_transfer(MIN_VOLUME, 2);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool do_get_maximum(struct usb_setup_packet *setup) {
+    usb_debug("AUDIO_REQ_GET_MAX\n");
+    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
+        switch (setup->wValue >> 8u) {
+            case FEATURE_VOLUME_CONTROL: {
+                usb_start_tiny_control_in_transfer(MAX_VOLUME, 2);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool do_get_resolution(struct usb_setup_packet *setup) {
+    usb_debug("AUDIO_REQ_GET_RES\n");
+    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
+        switch (setup->wValue >> 8u) {
+            case FEATURE_VOLUME_CONTROL: {
+                usb_start_tiny_control_in_transfer(VOLUME_RESOLUTION, 2);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+struct audio_control_cmd {
+    uint8_t cmd;
+    uint8_t type;
+    uint8_t cs;
+    uint8_t cn;
+    uint8_t unit;
+    uint8_t len;
+};
+
+static audio_control_cmd audio_control_cmd_t;
+
+static void _audio_reconfigure() {
+    switch (audio_state.freq) {
+        case 48000: audio_state.freq = 48000;
+            break;
+        default:
+            audio_state.freq = 48000;
+    }
+    // todo hack overwriting const
+    ((struct audio_format *) producer_pool->format)->sample_freq = audio_state.freq;
+}
+
+static void audio_set_volume(int16_t volume) {
+    audio_state.volume = volume;
+    // todo interpolate
+    volume += CENTER_VOLUME_INDEX * 256;
+    if (volume < 0) volume = 0;
+    if (volume >= count_of(db_to_vol) * 256) volume = count_of(db_to_vol) * 256 - 1;
+    audio_state.vol_mul = db_to_vol[((uint16_t)volume) >> 8u];
+//    printf("VOL MUL %04x\n", audio_state.vol_mul);
+}
+
+static void audio_cmd_packet(struct usb_endpoint *ep) {
+    assert(audio_control_cmd_t.cmd == AUDIO_REQ_SetCurrent);
+    struct usb_buffer *buffer = usb_current_out_packet_buffer(ep);
+    audio_control_cmd_t.cmd = 0;
+    if (buffer->data_len >= audio_control_cmd_t.len) {
+        if (audio_control_cmd_t.type == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
+            switch (audio_control_cmd_t.cs) {
+                case FEATURE_MUTE_CONTROL: {
+                    audio_state.mute = buffer->data[0];
+                    usb_warn("Set Mute %d\n", buffer->data[0]);
+                    break;
+                }
+                case FEATURE_VOLUME_CONTROL: {
+                    audio_set_volume(*(int16_t *) buffer->data);
+                    break;
+                }
+            }
+
+        } else if (audio_control_cmd_t.type == USB_REQ_TYPE_RECIPIENT_ENDPOINT) {
+            if (audio_control_cmd_t.cs == ENDPOINT_FREQ_CONTROL) {
+                uint32_t new_freq = (*(uint32_t *) buffer->data) & 0x00ffffffu;
+                usb_warn("Set freq %d\n", new_freq == 0xffffffu ? -1 : (int) new_freq);
+
+                if (audio_state.freq != new_freq) {
+                    audio_state.freq = new_freq;
+                    _audio_reconfigure();
+                }
+            }
+        }
+    }
+    usb_start_empty_control_in_transfer_null_completion();
+    // todo is there error handling?
+}
+
+static const struct usb_transfer_type _audio_cmd_transfer_type = {
+        .on_packet = audio_cmd_packet,
+        .initial_packet_count = 1,
+};
+
+static bool as_set_alternate(struct usb_interface *interface, uint alt) {
+    assert(interface == &as_op_interface);
+    usb_warn("SET ALTERNATE %d\n", alt);
+    return alt < 2;
+}
+
+static bool do_set_current(struct usb_setup_packet *setup) {
+#ifndef NDEBUG
+    usb_warn("AUDIO_REQ_SET_CUR\n");
+#endif
+
+    if (setup->wLength && setup->wLength < 64) {
+        audio_control_cmd_t.cmd = AUDIO_REQ_SetCurrent;
+        audio_control_cmd_t.type = setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK;
+        audio_control_cmd_t.len = (uint8_t) setup->wLength;
+        audio_control_cmd_t.unit = setup->wIndex >> 8u;
+        audio_control_cmd_t.cs = setup->wValue >> 8u;
+        audio_control_cmd_t.cn = (uint8_t) setup->wValue;
+        usb_start_control_out_transfer(&_audio_cmd_transfer_type);
+        return true;
+    }
+    return false;
+}
+
+static bool ac_setup_request_handler(__unused struct usb_interface *interface, struct usb_setup_packet *setup) {
+    setup = reinterpret_cast<struct usb_setup_packet*>(__builtin_assume_aligned(setup, 4));
+    if (USB_REQ_TYPE_TYPE_CLASS == (setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK)) {
+        switch (setup->bRequest) {
+            case AUDIO_REQ_SetCurrent:
+                return do_set_current(setup);
+
+            case AUDIO_REQ_GetCurrent:
+                return do_get_current(setup);
+
+            case AUDIO_REQ_GetMinimum:
+                return do_get_minimum(setup);
+
+            case AUDIO_REQ_GetMaximum:
+                return do_get_maximum(setup);
+
+            case AUDIO_REQ_GetResolution:
+                return do_get_resolution(setup);
+
+            default:
+                break;
+        }
+    }
+    return false;
+}
+
+bool _as_setup_request_handler(__unused struct usb_endpoint *ep, struct usb_setup_packet *setup) {
+    setup = reinterpret_cast<struct usb_setup_packet*>(__builtin_assume_aligned(setup, 4));
+    if (USB_REQ_TYPE_TYPE_CLASS == (setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK)) {
+        switch (setup->bRequest) {
+            case AUDIO_REQ_SetCurrent:
+                return do_set_current(setup);
+
+            case AUDIO_REQ_GetCurrent:
+                return do_get_current(setup);
+
+            case AUDIO_REQ_GetMinimum:
+                return do_get_minimum(setup);
+
+            case AUDIO_REQ_GetMaximum:
+                return do_get_maximum(setup);
+
+            case AUDIO_REQ_GetResolution:
+                return do_get_resolution(setup);
+
+            default:
+                break;
+        }
+    }
+    return false;
+}
+
+void usb_sound_card_init() {
+    //msd_interface.setup_request_handler = msd_setup_request_handler;
+    usb_interface_init(&ac_interface, &audio_device_config.ac_interface, nullptr, 0, true);
+    ac_interface.setup_request_handler = ac_setup_request_handler;
+
+    static struct usb_endpoint *const op_endpoints[] = {
+            &ep_op_out, &ep_op_sync
+    };
+    usb_interface_init(&as_op_interface, &audio_device_config.as_op_interface, op_endpoints, count_of(op_endpoints),
+                       true);
+    as_op_interface.set_alternate_handler = as_set_alternate;
+    ep_op_out.setup_request_handler = _as_setup_request_handler;
+    as_transfer.type = &as_transfer_type;
+    usb_set_default_transfer(&ep_op_out, &as_transfer);
+    as_sync_transfer.type = &as_sync_transfer_type;
+    usb_set_default_transfer(&ep_op_sync, &as_sync_transfer);
+
+    static struct usb_interface *const boot_device_interfaces[] = {
+            &ac_interface,
+            &as_op_interface,
+    };
+    __unused struct usb_device *device = usb_device_init(&boot_device_descriptor, &audio_device_config.descriptor,
+                                                         boot_device_interfaces, count_of(boot_device_interfaces),
+                                                         _get_descriptor_string);
+    assert(device);
+    audio_set_volume(0);
+    _audio_reconfigure();
+//    device->on_configure = _on_configure;
+    usb_device_start();
+}
+
+static void core1_worker() {
+    audio_i2s_set_enabled(true);
+}
+
+static audio_buffer_pool_t *ap;
 static struct audio_i2s_config config;
-static audio_buffer_pool_t *init_audio() {
+audio_buffer_pool_t *init_audio() {
     audio_i2s_set_enabled(false);
 
     static audio_format_t audio_format = {
@@ -103,39 +670,49 @@ static audio_buffer_pool_t *init_audio() {
         .sample_stride = 4
     };
 
-    struct audio_buffer_pool *producer_pool = audio_new_producer_pool(
-        &producer_format, 
-        4,
-        SAMPLES_PER_BUFFER);
+    producer_pool = audio_new_producer_pool(&producer_format, 32, 512);  // Match working setup
 
-    bool __unused ok;
-    const struct audio_format *output_format;
-
-    config = {
-        .data_pin = PIN_I2S_DATA,
-        .clock_pin_base = PIN_I2S_BCLK,
+    config = (struct audio_i2s_config){
+        .data_pin = PICO_AUDIO_I2S_DATA_PIN,
+        .clock_pin_base = PICO_AUDIO_I2S_CLOCK_PIN_BASE,
         .dma_channel = 0,
-        .pio_sm = 1
+        .pio_sm = 0  // Match the working one
     };
 
-    output_format = audio_i2s_setup(&audio_format, &config);
+    const struct audio_format *output_format = audio_i2s_setup(&audio_format, &config);
+    if (!output_format) {
+        panic("audio_i2s_setup failed");
+    }
 
-    ok = audio_i2s_connect(producer_pool);
+    bool __unused ok = audio_i2s_connect_extra(producer_pool, false, 2, 96, nullptr);
     assert(ok);
-    audio_i2s_set_enabled(true);
 
+    usb_sound_card_init();
+    multicore_launch_core1(core1_worker);
     return producer_pool;
+}
 
-  }
+WM8960* codec = nullptr;
 
-  WM8960* codec = nullptr;
+int main() {
+    board_init();
+    set_sys_clock_khz(256000, true);
 
-/*------------- MAIN -------------*/
-int main(void)
-{
-  board_init();
+    stdout_uart_init();
 
-    i2c_init(i2c0, 400000);  // 400kHz I2C
+    //gpio_debug_pins_init();
+    puts("USB SOUND CARD");
+
+#ifndef NDEBUG
+    for(uint i=0;i<count_of(audio_device_config.as_audio.format.freqs);i++) {
+        uint freq = audio_device_config.as_audio.format.freqs[i].Byte1 |
+                (audio_device_config.as_audio.format.freqs[i].Byte2 << 8u) |
+                (audio_device_config.as_audio.format.freqs[i].Byte3 << 16u);
+        assert(freq <= current_sample_rate);
+    }
+#endif
+
+    i2c_init(i2c0, current_sample_rate);
     gpio_set_function(PIN_I2C_SDA, GPIO_FUNC_I2C);
     gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(PIN_I2C_SDA);
@@ -149,29 +726,12 @@ int main(void)
     codec -> set_headphone(INITIAL_VOLUME);
     codec -> set_speaker(INITIAL_VOLUME);
     codec -> set_gain(-10.0f);
-
     ap = init_audio();
 
-  // init device stack on configured roothub port
-  tusb_rhport_init_t dev_init = {
-    .role = TUSB_ROLE_DEVICE,
-    .speed = TUSB_SPEED_AUTO
-  };
-  tusb_init(BOARD_TUD_RHPORT, &dev_init);
-
-  if (board_init_after_tusb) {
-    board_init_after_tusb();
-  }
-
-  while (1)
-  {
-    tud_task(); // TinyUSB device task
-    led_blinking_task();
-#if CFG_AUDIO_DEBUG
-    audio_debug_task();
-#endif
-    audio_task();
-  }
+    while (1) {
+        __wfi();
+        audio_task();
+    }
 }
 
 void audio_task(void) {
@@ -180,16 +740,6 @@ void audio_task(void) {
     uint32_t now = board_millis();
     if (now - last_run < 1) return;
     last_run = now;
-
-    if (!tud_audio_mounted()) return;
-
-    if(current_sample_rate != new_sample_rate) {
-      current_sample_rate = new_sample_rate;
-      delete ap;
-      ap = nullptr;
-      sleep_ms(10);
-      ap = init_audio();
-    }
 
     // Normal audio processing
     audio_buffer_t *buffer = take_audio_buffer(ap, false);
@@ -219,353 +769,3 @@ void audio_task(void) {
 
     give_audio_buffer(ap, buffer);
 }
-
-//--------------------------------------------------------------------+
-// Device callbacks
-//--------------------------------------------------------------------+
-
-// Invoked when device is mounted
-void tud_mount_cb(void)
-{
-  blink_interval_ms = BLINK_MOUNTED;
-}
-
-// Invoked when device is unmounted
-void tud_umount_cb(void)
-{
-  blink_interval_ms = BLINK_NOT_MOUNTED;
-}
-
-// Invoked when usb bus is suspended
-// remote_wakeup_en : if host allow us  to perform remote wakeup
-// Within 7ms, device must draw an average of current less than 2.5 mA from bus
-void tud_suspend_cb(bool remote_wakeup_en)
-{
-  (void)remote_wakeup_en;
-  blink_interval_ms = BLINK_SUSPENDED;
-}
-
-// Invoked when usb bus is resumed
-void tud_resume_cb(void)
-{
-  blink_interval_ms = tud_mounted() ? BLINK_MOUNTED : BLINK_NOT_MOUNTED;
-}
-
-//--------------------------------------------------------------------+
-// Application Callback API Implementations
-//--------------------------------------------------------------------+
-
-// Helper for clock get requests
-static bool tud_audio_clock_get_request(uint8_t rhport, audio_control_request_t const *request)
-{
-  TU_ASSERT(request->bEntityID == UAC2_ENTITY_CLOCK);
-
-  if (request->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ)
-  {
-    if (request->bRequest == AUDIO_CS_REQ_CUR)
-    {
-      TU_LOG1("Clock get current freq %lu\r\n", current_sample_rate);
-
-      audio_control_cur_4_t curf = { (int32_t) tu_htole32(current_sample_rate) };
-      return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &curf, sizeof(curf));
-    }
-    else if (request->bRequest == AUDIO_CS_REQ_RANGE)
-    {
-      audio_control_range_4_n_t(N_SAMPLE_RATES) rangef =
-      {
-        .wNumSubRanges = tu_htole16(N_SAMPLE_RATES)
-      };
-
-      for(uint8_t i = 0; i < N_SAMPLE_RATES; i++)
-      {
-        rangef.subrange[i].bMin = (int32_t) sample_rates[i];
-        rangef.subrange[i].bMax = (int32_t) sample_rates[i];
-        rangef.subrange[i].bRes = 0;
-      }
-
-      return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &rangef, sizeof(rangef));
-    }
-  }
-  else if (request->bControlSelector == AUDIO_CS_CTRL_CLK_VALID &&
-           request->bRequest == AUDIO_CS_REQ_CUR)
-  {
-    audio_control_cur_1_t cur_valid = { .bCur = 1 };
-    return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &cur_valid, sizeof(cur_valid));
-  }
-
-  return false;
-}
-
-// Helper for clock set requests
-static bool tud_audio_clock_set_request(uint8_t rhport, audio_control_request_t const *request, uint8_t const *buf)
-{
-  (void)rhport;
-
-  TU_ASSERT(request->bEntityID == UAC2_ENTITY_CLOCK);
-  TU_VERIFY(request->bRequest == AUDIO_CS_REQ_CUR);
-
-  if (request->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ)
-  {
-    TU_VERIFY(request->wLength == sizeof(audio_control_cur_4_t));
-
-    new_sample_rate = (uint32_t) ((audio_control_cur_4_t const *)buf)->bCur;
-    codec -> set_sample_rate_on_fly(new_sample_rate);
-
-    TU_LOG1("Clock set current freq: %ld\r\n", current_sample_rate);
-
-    return true;
-  }
-  else
-  {
-    TU_LOG1("Clock set request not supported, entity = %u, selector = %u, request = %u\r\n",
-            request->bEntityID, request->bControlSelector, request->bRequest);
-    return false;
-  }
-}
-
-static bool tud_audio_feature_unit_get_request(uint8_t rhport, audio_control_request_t const *request)
-{
-    TU_ASSERT(request->bEntityID == UAC2_ENTITY_FEATURE_UNIT);
-
-    if (request->bControlSelector == AUDIO_FU_CTRL_MUTE && request->bRequest == AUDIO_CS_REQ_CUR)
-    {
-        audio_control_cur_1_t mute1;
-        mute1.bCur = mute[request->bChannelNumber];
-        TU_LOG1("Get channel %u mute %d\r\n", request->bChannelNumber, mute1.bCur);
-        return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &mute1, sizeof(mute1));
-    }
-    else if (request->bControlSelector == AUDIO_FU_CTRL_VOLUME)
-    {
-        if (request->bRequest == AUDIO_CS_REQ_RANGE)
-        {
-            audio_control_range_2_n_t(1) range_vol = {};
-            range_vol.wNumSubRanges = tu_htole16(1);
-            range_vol.subrange[0].bMin = tu_htole16(-VOLUME_CTRL_50_DB);
-            range_vol.subrange[0].bMax = tu_htole16(VOLUME_CTRL_0_DB);
-            range_vol.subrange[0].bRes = tu_htole16(256);
-            
-            TU_LOG1("Get channel %u volume range (%d, %d, %u) dB\r\n", request->bChannelNumber,
-                    range_vol.subrange[0].bMin / 256, range_vol.subrange[0].bMax / 256, range_vol.subrange[0].bRes / 256);
-            return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &range_vol, sizeof(range_vol));
-        }
-        else if (request->bRequest == AUDIO_CS_REQ_CUR)
-        {
-            audio_control_cur_2_t cur_vol;
-            cur_vol.bCur = tu_htole16(volume[request->bChannelNumber]);
-            TU_LOG1("Get channel %u volume %d dB\r\n", request->bChannelNumber, cur_vol.bCur / 256);
-            return tud_audio_buffer_and_schedule_control_xfer(rhport, (tusb_control_request_t const *)request, &cur_vol, sizeof(cur_vol));
-        }
-    }
-    
-    TU_LOG1("Feature unit get request not supported, entity = %u, selector = %u, request = %u\r\n",
-            request->bEntityID, request->bControlSelector, request->bRequest);
-
-    return false;
-}
-
-// Helper for feature unit set requests
-static bool tud_audio_feature_unit_set_request(uint8_t rhport, audio_control_request_t const *request, uint8_t const *buf)
-{
-  (void)rhport;
-
-  TU_ASSERT(request->bEntityID == UAC2_ENTITY_FEATURE_UNIT);
-  TU_VERIFY(request->bRequest == AUDIO_CS_REQ_CUR);
-
-  if (request->bControlSelector == AUDIO_FU_CTRL_MUTE)
-  {
-    TU_VERIFY(request->wLength == sizeof(audio_control_cur_1_t));
-
-    mute[request->bChannelNumber] = ((audio_control_cur_1_t const *)buf)->bCur;
-
-    TU_LOG1("Set channel %d Mute: %d\r\n", request->bChannelNumber, mute[request->bChannelNumber]);
-
-    return true;
-  }
-  else if (request->bControlSelector == AUDIO_FU_CTRL_VOLUME)
-  {
-    TU_VERIFY(request->wLength == sizeof(audio_control_cur_2_t));
-
-    volume[request->bChannelNumber] = ((audio_control_cur_2_t const *)buf)->bCur;
-
-    TU_LOG1("Set channel %d volume: %d dB\r\n", request->bChannelNumber, volume[request->bChannelNumber] / 256);
-
-    return true;
-  }
-  else
-  {
-    TU_LOG1("Feature unit set request not supported, entity = %u, selector = %u, request = %u\r\n",
-            request->bEntityID, request->bControlSelector, request->bRequest);
-    return false;
-  }
-}
-
-// Invoked when audio class specific get request received for an entity
-bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request)
-{
-  audio_control_request_t const *request = (audio_control_request_t const *)p_request;
-
-  if (request->bEntityID == UAC2_ENTITY_CLOCK)
-    return tud_audio_clock_get_request(rhport, request);
-  if (request->bEntityID == UAC2_ENTITY_FEATURE_UNIT)
-    return tud_audio_feature_unit_get_request(rhport, request);
-  else
-  {
-    TU_LOG1("Get request not handled, entity = %d, selector = %d, request = %d\r\n",
-            request->bEntityID, request->bControlSelector, request->bRequest);
-  }
-  return false;
-}
-
-// Invoked when audio class specific set request received for an entity
-bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *buf)
-{
-  audio_control_request_t const *request = (audio_control_request_t const *)p_request;
-
-  if (request->bEntityID == UAC2_ENTITY_FEATURE_UNIT)
-    return tud_audio_feature_unit_set_request(rhport, request, buf);
-  if (request->bEntityID == UAC2_ENTITY_CLOCK)
-    return tud_audio_clock_set_request(rhport, request, buf);
-  TU_LOG1("Set request not handled, entity = %d, selector = %d, request = %d\r\n",
-          request->bEntityID, request->bControlSelector, request->bRequest);
-
-  return false;
-}
-
-bool tud_audio_set_itf_close_EP_cb(uint8_t rhport, tusb_control_request_t const * p_request)
-{
-  (void)rhport;
-
-  uint8_t const itf = tu_u16_low(tu_le16toh(p_request->wIndex));
-  uint8_t const alt = tu_u16_low(tu_le16toh(p_request->wValue));
-
-  if (ITF_NUM_AUDIO_STREAMING == itf && alt == 0)
-      blink_interval_ms = BLINK_MOUNTED;
-
-  return true;
-}
-
-bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const * p_request)
-{
-  (void)rhport;
-  uint8_t const itf = tu_u16_low(tu_le16toh(p_request->wIndex));
-  uint8_t const alt = tu_u16_low(tu_le16toh(p_request->wValue));
-
-  TU_LOG2("Set interface %d alt %d\r\n", itf, alt);
-  if (ITF_NUM_AUDIO_STREAMING == itf && alt != 0)
-      blink_interval_ms = BLINK_STREAMING;
-
-#if CFG_AUDIO_DEBUG
-  current_alt_settings = alt;
-#endif
-
-  return true;
-}
-
-void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf, audio_feedback_params_t* feedback_param)
-{
-  (void)func_id;
-  (void)alt_itf;
-  // Set feedback method to fifo counting
-  feedback_param->method = AUDIO_FEEDBACK_METHOD_FIFO_COUNT;
-  feedback_param->sample_freq = current_sample_rate;
-}
-
-#if CFG_AUDIO_DEBUG
-bool tud_audio_rx_done_post_read_cb(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting)
-{
-  (void)rhport;
-  (void)n_bytes_received;
-  (void)func_id;
-  (void)ep_out;
-  (void)cur_alt_setting;
-
-  fifo_count = tud_audio_available();
-  // Same averaging method used in UAC2 class
-  fifo_count_avg = (uint32_t)(((uint64_t)fifo_count_avg * 63  + ((uint32_t)fifo_count << 16)) >> 6);
-
-  return true;
-}
-#endif
-
-#if CFG_QUIRK_OS_GUESSING
-bool tud_audio_feedback_format_correction_cb(uint8_t func_id)
-{
-  (void)func_id;
-  if(tud_speed_get() == TUSB_SPEED_FULL && quirk_os_guessing_get() == QUIRK_OS_GUESSING_OSX) {
-    return true;
-  } else {
-    return false;
-  }
-}
-#endif
-//--------------------------------------------------------------------+
-// BLINKING TASK
-//--------------------------------------------------------------------+
-void led_blinking_task(void)
-{
-  static uint32_t start_ms = 0;
-  static bool led_state = false;
-
-  // Blink every interval ms
-  if (board_millis() - start_ms < blink_interval_ms) return;
-  start_ms += blink_interval_ms;
-
-  board_led_write(led_state);
-  led_state = 1 - led_state;
-}
-
-#if CFG_AUDIO_DEBUG
-//--------------------------------------------------------------------+
-// HID interface for audio debug
-//--------------------------------------------------------------------+
-// Every 1ms, we will sent 1 debug information report
-void audio_debug_task(void)
-{
-  static uint32_t start_ms = 0;
-  uint32_t curr_ms = board_millis();
-  if ( start_ms == curr_ms ) return; // not enough time
-  start_ms = curr_ms;
-
-  audio_debug_info_t debug_info;
-  debug_info.sample_rate    = current_sample_rate;
-  debug_info.alt_settings   = current_alt_settings;
-  debug_info.fifo_size      = CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ;
-  debug_info.fifo_count     = fifo_count;
-  debug_info.fifo_count_avg = (uint16_t) (fifo_count_avg >> 16);
-  for (int i = 0; i < CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX + 1; i++)
-  {
-    debug_info.mute[i] = mute[i];
-    debug_info.volume[i] = volume[i];
-  }
-
-  if(tud_hid_ready())
-    tud_hid_report(0, &debug_info, sizeof(debug_info));
-}
-
-// Invoked when received GET_REPORT control request
-// Unused here
-uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen)
-{
-  // TODO not Implemented
-  (void) itf;
-  (void) report_id;
-  (void) report_type;
-  (void) buffer;
-  (void) reqlen;
-
-  return 0;
-}
-
-// Invoked when received SET_REPORT control request or
-// Unused here
-void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize)
-{
-  // This example doesn't use multiple report and report ID
-  (void) itf;
-  (void) report_id;
-  (void) report_type;
-  (void) buffer;
-  (void) bufsize;
-}
-
-#endif
