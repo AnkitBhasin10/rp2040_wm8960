@@ -74,6 +74,7 @@ static const char *descriptor_strings[] =
 #define ENDPOINT_FREQ_CONTROL 1u
 
 void audio_task(void);
+inline int16_t soft_limit(int16_t sample);
 
 struct audio_device_config {
     struct usb_configuration_descriptor descriptor;
@@ -726,12 +727,20 @@ int main() {
     codec -> set_headphone(INITIAL_VOLUME);
     codec -> set_speaker(INITIAL_VOLUME);
     codec -> set_gain(-10.0f);
+
     ap = init_audio();
 
     while (1) {
         __wfi();
         audio_task();
     }
+}
+
+inline int16_t soft_limit(int16_t sample) {
+    const int32_t x = sample;
+    if (x > 28000) return 28000 + ((x - 28000) >> 2);
+    if (x < -28000) return -28000 + ((x + 28000) >> 2);
+    return sample;
 }
 
 void audio_task(void) {
@@ -741,27 +750,40 @@ void audio_task(void) {
     if (now - last_run < 1) return;
     last_run = now;
 
-    // Normal audio processing
     audio_buffer_t *buffer = take_audio_buffer(ap, false);
     if (!buffer) return;
 
-    uint32_t bytes_needed = (current_sample_rate / 1000) * 
-                          CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX * 
-                          CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX;
+    uint32_t bytes_needed = (current_sample_rate / 1000) *
+                            CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX *
+                            CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX;
 
     uint32_t bytes_read = tud_audio_read((uint8_t*)buffer->buffer->bytes, bytes_needed);
-    uint32_t samples_read = bytes_read / (CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX * 
-                                       CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX);
+    uint32_t samples_read = bytes_read / (CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX *
+                                          CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX);
 
     if (samples_read > 0) {
+        int16_t* samples = (int16_t*)buffer->buffer->bytes;
+
+        #define PEAK_LIMITER_GAIN 0.8f
+
+        // If mono, convert to stereo *after* processing
         if (CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX == 1) {
-            int16_t *samples = (int16_t *)buffer->buffer->bytes;
-            for (int i = samples_read-1; i >= 0; i--) {
-                samples[2*i] = samples[i];     
-                samples[2*i + 1] = samples[i];
+            for (int i = samples_read - 1; i >= 0; i--) {
+                // Apply gain and soft limit before expanding
+                int16_t mono = (int16_t)((int32_t)samples[i] * PEAK_LIMITER_GAIN);
+                mono = soft_limit(mono);
+                samples[2 * i]     = mono;
+                samples[2 * i + 1] = mono;
             }
             samples_read *= 2;
+        } else {
+            // Stereo: apply gain and soft limit directly
+            for (int i = 0; i < samples_read * 2; i++) {
+                int32_t val = (int32_t)samples[i] * PEAK_LIMITER_GAIN;
+                samples[i] = soft_limit((int16_t)val);
+            }
         }
+
         buffer->sample_count = samples_read;
     } else {
         buffer->sample_count = 0;

@@ -1052,7 +1052,7 @@ void WM8960_Advanced::set_sample_rate(int value) {
     set_pll_prescale_div2(true);
     set_system_clock_div2(true);
     set_base_clock_divider(4.0f);
-    set_amp_clock_divider(16.0f);
+    set_amp_clock_divider(8.0f);
 
    if (value == 44100 || value == 48000) {
         // Optimal settings for standard rates
@@ -1102,11 +1102,22 @@ WM8960::WM8960(i2c_inst_t* i2c, int sample_rate, int bit_depth)
      // Configure with reduced default gains
     _codec.set_mic_boost_gain(13.0f); // Moderate boost instead of 0
     _codec.set_adc_volume(-12.0f); // Start with lower ADC gain
-    _codec.set_dac_volume(0.5f); // Moderate DAC output
+    _codec.set_dac_volume(0.8f); // Moderate DAC output
     
     // Enable DC filters
     _codec.set_enhance_filter_hpf(true);
     _codec.set_enhance_filter_lpf(true);
+    _codec.set_input2_boost(0.0f);
+    _codec.set_input3_boost(0.0f);
+    _codec.set_mic_output(false); // Avoid unnecessary analog routing
+    _codec.set_input2_boost(BOOST_GAIN_MIN - 1.0f); // Effectively disables
+    _codec.set_input3_output(false);
+    _codec.set_dac_soft_mute(true);
+    _codec.set_dac_slow_soft_mute(true); // smooth ramp
+    _codec.set_alc(false);
+    _codec.set_noise_gate(false);
+    _codec.set_input3_output(false); // If not using IN3
+    _codec.set_mic_output(false);    // Avoid analog feedback
 }
 
 int WM8960::get_sample_rate() const { return _codec.get_sample_rate(); }
