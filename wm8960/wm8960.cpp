@@ -573,11 +573,13 @@ float WM8960_Advanced::get_dac_volume() const {
 }
 
 void WM8960_Advanced::set_dac_volume(float value) {
-    uint8_t vol = round(map_range(value, DAC_VOLUME_MIN, DAC_VOLUME_MAX, 1, 255));
+    value = std::clamp(value, 0.0f, 1.0f);  // Clamp again for safety
+
+    uint8_t vol = round(map_range(value, 0.0f, 1.0f, 1.0f, 255.0f));
     _set_bits(0x0A, 0xFF, 0, vol);
     _set_bits(0x0B, 0xFF, 0, vol);
-    _set_bit(0x0A, 8, true);
-    _set_bit(0x0B, 8, true);
+    _set_bit(0x0A, 8, true);  // Update L
+    _set_bit(0x0B, 8, true);  // Update R
 }
 
 bool WM8960_Advanced::get_dac_mute() const { return _get_bit(0x05, 3); }
@@ -1050,7 +1052,7 @@ void WM8960_Advanced::set_sample_rate(int value) {
     set_pll_prescale_div2(true);
     set_system_clock_div2(true);
     set_base_clock_divider(4.0f);
-    set_amp_clock_divider(16.0f);
+    set_amp_clock_divider(8.0f);
 
    if (value == 44100 || value == 48000) {
         // Optimal settings for standard rates
@@ -1100,11 +1102,22 @@ WM8960::WM8960(i2c_inst_t* i2c, int sample_rate, int bit_depth)
      // Configure with reduced default gains
     _codec.set_mic_boost_gain(13.0f); // Moderate boost instead of 0
     _codec.set_adc_volume(-12.0f); // Start with lower ADC gain
-    _codec.set_dac_volume(0.5f); // Moderate DAC output
+    _codec.set_dac_volume(0.8f); // Moderate DAC output
     
     // Enable DC filters
     _codec.set_enhance_filter_hpf(true);
     _codec.set_enhance_filter_lpf(true);
+    _codec.set_input2_boost(0.0f);
+    _codec.set_input3_boost(0.0f);
+    _codec.set_mic_output(false); // Avoid unnecessary analog routing
+    _codec.set_input2_boost(BOOST_GAIN_MIN - 1.0f); // Effectively disables
+    _codec.set_input3_output(false);
+    _codec.set_dac_soft_mute(true);
+    _codec.set_dac_slow_soft_mute(true); // smooth ramp
+    _codec.set_alc(false);
+    _codec.set_noise_gate(false);
+    _codec.set_input3_output(false); // If not using IN3
+    _codec.set_mic_output(false);    // Avoid analog feedback
 }
 
 int WM8960::get_sample_rate() const { return _codec.get_sample_rate(); }
@@ -1188,12 +1201,15 @@ float WM8960::get_volume() const {
 }
 
 void WM8960::set_volume(float value) {
+    value = std::clamp(value, 0.0f, 1.0f);
+
     if (value <= 0.0f) {
         _codec.set_dac_mute(true);
     } else if (_codec.get_dac_mute()) {
         _codec.set_dac_mute(false);
     }
-    _codec.set_dac_volume(map_range(value, 0.0f, 1.0f, DAC_VOLUME_MIN, DAC_VOLUME_MAX));
+
+    _codec.set_dac_volume(value);
 }
 
 float WM8960::get_headphone() const {
