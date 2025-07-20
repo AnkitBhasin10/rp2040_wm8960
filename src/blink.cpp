@@ -441,42 +441,22 @@ static void _as_audio_packet(struct usb_endpoint *ep) {
 static void _as_audio_in_packet(struct usb_endpoint *ep) {
     assert(ep->current_transfer);
 
-    // 1. Buffer acquisition with timeout protection (non-blocking)
     struct usb_buffer *usb_buffer = usb_current_in_packet_buffer(ep);
-    struct audio_buffer *audio_buffer = take_audio_buffer(producer_pool, false);
-    if (!audio_buffer) {
-        static uint32_t underrun_count = 0;
-        if (++underrun_count % 100 == 0) {
-            printf("Warning: Audio buffer underrun (%d)\n", underrun_count);
-        }
+    
+    const uint32_t expected_bytes = AUDIO_MAX_PACKET_SIZE(current_sample_rate);
+    const uint32_t sample_count = expected_bytes / 2;
+    
+    // Ensure we don't exceed buffer size
+    if (expected_bytes > usb_buffer->data_max) {
         usb_grow_transfer(ep->current_transfer, 1);
         usb_packet_done(ep);
         return;
     }
-
-    // 2. Calculate sample count (16-bit stereo = 4 bytes per sample)
-    const uint32_t sample_count = usb_buffer->data_len / 4;
-    audio_buffer->sample_count = sample_count;
-
-    // 4. Get buffer pointers with cache alignment
-    __attribute__((aligned(4))) int16_t *out = (int16_t *)audio_buffer->buffer->bytes;
-    __attribute__((aligned(4))) const int16_t *in = (const int16_t *)usb_buffer->data;
-
-    // 5. High-quality transfer with DC offset correction
-    static int32_t dc_offset = 0;
-    for (uint32_t i = 0; i < sample_count * 2; i++) {
-        // DC offset removal (high-pass filter)
-        int32_t sample = in[i];
-        dc_offset = (dc_offset * 31 + sample) / 32;
-        out[i] = (int16_t)(sample - dc_offset);
-        
-        // Soft clipping to prevent distortion
-        if (out[i] > 32760) out[i] = 32760;
-        if (out[i] < -32760) out[i] = -32760;
-    }
-
-    // 6. Buffer submission with timing optimization
-    give_audio_buffer(producer_pool, audio_buffer);
+    
+    // Fill with silence (zeros) - this makes the recorder think there's a working mic
+    memset(usb_buffer->data, 0, expected_bytes);
+    usb_buffer->data_len = expected_bytes;
+    
     usb_grow_transfer(ep->current_transfer, 1);
     usb_packet_done(ep);
 }
