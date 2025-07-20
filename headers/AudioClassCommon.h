@@ -476,7 +476,7 @@ typedef struct
     uint16_t wTotalLength; /**< Total length of the Audio class-specific descriptors, including this descriptor. */
 
     uint8_t  bInCollection; /**< Total number of Audio Streaming interfaces linked to this Audio Control interface (must be 1). */
-    uint8_t  bInterfaceNumbers; /**< Interface number of the associated Audio Streaming interface. */
+    uint8_t  bInterfaceNumbers[2]; /**< Interface number of the associated Audio Streaming interface. */
 } ATTR_PACKED USB_Audio_StdDescriptor_Interface_AC_t;
 
 /** \brief Audio class-specific Feature Unit Descriptor (LUFA naming conventions).

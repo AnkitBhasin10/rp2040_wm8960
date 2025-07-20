@@ -84,6 +84,8 @@ struct audio_device_config {
         USB_Audio_StdDescriptor_InputTerminal_t input_terminal;
         USB_Audio_StdDescriptor_FeatureUnit_t feature_unit;
         USB_Audio_StdDescriptor_OutputTerminal_t output_terminal;
+        USB_Audio_StdDescriptor_InputTerminal_t input_terminal_2;
+        USB_Audio_StdDescriptor_OutputTerminal_t output_terminal_2;
     } ac_audio;
     struct usb_interface_descriptor as_zero_interface;
     struct usb_interface_descriptor as_op_interface;
@@ -98,7 +100,19 @@ struct audio_device_config {
         struct usb_endpoint_descriptor_long core;
         USB_Audio_StdDescriptor_StreamEndpoint_Spc_t audio;
     } ep1;
-    struct usb_endpoint_descriptor_long ep2;
+    struct usb_interface_descriptor as_zero_interface_2;
+    struct usb_interface_descriptor as_op_interface_2;
+    struct __attribute__((packed)) {
+        USB_Audio_StdDescriptor_Interface_AS_t streaming;
+        struct __attribute__((packed)) {
+            USB_Audio_StdDescriptor_Format_t core;
+            USB_Audio_SampleFreq_t freqs[2];
+        } format;
+    } as_audio_2;
+    struct __attribute__((packed)) {
+        struct usb_endpoint_descriptor_long core;
+        USB_Audio_StdDescriptor_StreamEndpoint_Spc_t audio;
+    } ep2;
 };
 
 static const struct audio_device_config audio_device_config = {
@@ -106,7 +120,7 @@ static const struct audio_device_config audio_device_config = {
                 .bLength             = sizeof(audio_device_config.descriptor),
                 .bDescriptorType     = DTYPE_Configuration,
                 .wTotalLength        = sizeof(audio_device_config),
-                .bNumInterfaces      = 2,
+                .bNumInterfaces      = 3,
                 .bConfigurationValue = 0x01,
                 .iConfiguration      = 0x00,
                 .bmAttributes        = 0x80,
@@ -130,8 +144,8 @@ static const struct audio_device_config audio_device_config = {
                         .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_Header,
                         .bcdADC = VERSION_BCD(1, 0, 0),
                         .wTotalLength = sizeof(audio_device_config.ac_audio),
-                        .bInCollection = 1,
-                        .bInterfaceNumbers = 1,
+                        .bInCollection = 2,
+                        .bInterfaceNumbers = {1, 2}
                 },
                 .input_terminal = {
                         .bLength = sizeof(audio_device_config.ac_audio.input_terminal),
@@ -160,9 +174,31 @@ static const struct audio_device_config audio_device_config = {
                         .bDescriptorType = AUDIO_DTYPE_CSInterface,
                         .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_OutputTerminal,
                         .bTerminalID = 3,
-                        .wTerminalType = AUDIO_TERMINAL_OUT_SPEAKER,
+                        .wTerminalType = AUDIO_TERMINAL_OUT_HEADPHONES,
                         .bAssocTerminal = 0,
                         .bSourceID = 2,
+                        .iTerminal = 0,
+                },
+                .input_terminal_2 = {
+                        .bLength = sizeof(audio_device_config.ac_audio.input_terminal_2),
+                        .bDescriptorType = AUDIO_DTYPE_CSInterface,
+                        .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_InputTerminal,
+                        .bTerminalID = 4,
+                        .wTerminalType = AUDIO_TERMINAL_IN_PERSONAL_MIC,
+                        .bAssocTerminal = 0,
+                        .bNrChannels = 1,
+                        .wChannelConfig = AUDIO_CHANNEL_CENTER_FRONT,
+                        .iChannelNames = 0,
+                        .iTerminal = 0,
+                },
+                .output_terminal_2 = {
+                        .bLength = sizeof(audio_device_config.ac_audio.output_terminal_2),
+                        .bDescriptorType = AUDIO_DTYPE_CSInterface,
+                        .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_OutputTerminal,
+                        .bTerminalID = 5,
+                        .wTerminalType = AUDIO_TERMINAL_STREAMING,
+                        .bAssocTerminal = 0,
+                        .bSourceID = 4,
                         .iTerminal = 0,
                 },
         },
@@ -182,7 +218,7 @@ static const struct audio_device_config audio_device_config = {
                 .bDescriptorType    = DTYPE_Interface,
                 .bInterfaceNumber   = 0x01,
                 .bAlternateSetting  = 0x01,
-                .bNumEndpoints      = 0x02,
+                .bNumEndpoints      = 0x01,
                 .bInterfaceClass    = AUDIO_CSCP_AudioClass,
                 .bInterfaceSubClass = AUDIO_CSCP_AudioStreamingSubclass,
                 .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
@@ -194,7 +230,7 @@ static const struct audio_device_config audio_device_config = {
                         .bDescriptorType = AUDIO_DTYPE_CSInterface,
                         .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_General,
                         .bTerminalLink = 1,
-                        .bDelay = 1,
+                        .bDelay = 0,
                         .wFormatTag = 1, // PCM
                 },
                 .format = {
@@ -222,38 +258,96 @@ static const struct audio_device_config audio_device_config = {
                         .wMaxPacketSize   = AUDIO_MAX_PACKET_SIZE(current_sample_rate),
                         .bInterval        = 1,
                         .bRefresh         = 0,
-                        .bSyncAddr        = AUDIO_IN_ENDPOINT,
+                        .bSyncAddr        = 0,
                 },
                 .audio = {
                         .bLength = sizeof(audio_device_config.ep1.audio),
                         .bDescriptorType = AUDIO_DTYPE_CSEndpoint,
                         .bDescriptorSubtype = AUDIO_DSUBTYPE_CSEndpoint_General,
-                        .bmAttributes = 1,
+                        .bmAttributes = 0,
                         .bLockDelayUnits = 0,
                         .wLockDelay = 0,
                 }
         },
+        .as_zero_interface_2 = {
+                .bLength            = sizeof(audio_device_config.as_zero_interface_2),
+                .bDescriptorType    = DTYPE_Interface,
+                .bInterfaceNumber   = 0x02,
+                .bAlternateSetting  = 0x00,
+                .bNumEndpoints      = 0x00,
+                .bInterfaceClass    = AUDIO_CSCP_AudioClass,
+                .bInterfaceSubClass = AUDIO_CSCP_AudioStreamingSubclass,
+                .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
+                .iInterface         = 0x00,
+        },
+        .as_op_interface_2 = {
+                .bLength            = sizeof(audio_device_config.as_op_interface_2),
+                .bDescriptorType    = DTYPE_Interface,
+                .bInterfaceNumber   = 0x02,
+                .bAlternateSetting  = 0x01,
+                .bNumEndpoints      = 0x01,
+                .bInterfaceClass    = AUDIO_CSCP_AudioClass,
+                .bInterfaceSubClass = AUDIO_CSCP_AudioStreamingSubclass,
+                .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
+                .iInterface         = 0x00,
+        },
+        .as_audio_2 = {
+                .streaming = {
+                        .bLength = sizeof(audio_device_config.as_audio_2.streaming),
+                        .bDescriptorType = AUDIO_DTYPE_CSInterface,
+                        .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_General,
+                        .bTerminalLink = 5,
+                        .bDelay = 1,
+                        .wFormatTag = 1, // PCM
+                },
+                .format = {
+                        .core = {
+                                .bLength = sizeof(audio_device_config.as_audio_2.format),
+                                .bDescriptorType = AUDIO_DTYPE_CSInterface,
+                                .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_FormatType,
+                                .bFormatType = 1,
+                                .bNrChannels = 1,
+                                .bSubFrameSize = 2,
+                                .bBitResolution = 16,
+                                .bSampleFrequencyType = count_of(audio_device_config.as_audio_2.format.freqs),
+                        },
+                        .freqs = {
+                                AUDIO_SAMPLE_FREQ(48000)
+                        },
+                },
+        },
         .ep2 = {
-                .bLength          = sizeof(audio_device_config.ep2),
-                .bDescriptorType  = 0x05,
-                .bEndpointAddress = AUDIO_IN_ENDPOINT,
-                .bmAttributes     = 0x11,
-                .wMaxPacketSize   = 3,
-                .bInterval        = 0x01,
-                .bRefresh         = 2,
-                .bSyncAddr        = 0,
+                .core = {
+                        .bLength          = sizeof(audio_device_config.ep2.core),
+                        .bDescriptorType  = DTYPE_Endpoint,
+                        .bEndpointAddress = AUDIO_IN_ENDPOINT,
+                        .bmAttributes     = 5,
+                        .wMaxPacketSize   = AUDIO_MAX_PACKET_SIZE(current_sample_rate),
+                        .bInterval        = 1,
+                        .bRefresh         = 0,
+                        .bSyncAddr        = 0,
+                },
+                .audio = {
+                        .bLength = sizeof(audio_device_config.ep2.audio),
+                        .bDescriptorType = AUDIO_DTYPE_CSEndpoint,
+                        .bDescriptorSubtype = AUDIO_DSUBTYPE_CSEndpoint_General,
+                        .bmAttributes = 0,
+                        .bLockDelayUnits = 0,
+                        .wLockDelay = 0,
+                }
         },
 };
 
 static struct usb_interface ac_interface;
 static struct usb_interface as_op_interface;
-static struct usb_endpoint ep_op_out, ep_op_sync;
+static struct usb_interface as_op_interface_2;
+static struct usb_endpoint ep_op_out, ep_op_sync, ep_op_in;
 
 static const struct usb_device_descriptor boot_device_descriptor = {
         .bLength            = 18,
         .bDescriptorType    = 0x01,
         .bcdUSB             = 0x0110,
-        .bDeviceClass       = 0x00,
+        .bDeviceClass       = 0x01,
         .bDeviceSubClass    = 0x00,
         .bDeviceProtocol    = 0x00,
         .bMaxPacketSize0    = 0x40,
@@ -344,6 +438,49 @@ static void _as_audio_packet(struct usb_endpoint *ep) {
     usb_packet_done(ep);
 }
 
+static void _as_audio_in_packet(struct usb_endpoint *ep) {
+    assert(ep->current_transfer);
+
+    // 1. Buffer acquisition with timeout protection (non-blocking)
+    struct usb_buffer *usb_buffer = usb_current_in_packet_buffer(ep);
+    struct audio_buffer *audio_buffer = take_audio_buffer(producer_pool, false);
+    if (!audio_buffer) {
+        static uint32_t underrun_count = 0;
+        if (++underrun_count % 100 == 0) {
+            printf("Warning: Audio buffer underrun (%d)\n", underrun_count);
+        }
+        usb_grow_transfer(ep->current_transfer, 1);
+        usb_packet_done(ep);
+        return;
+    }
+
+    // 2. Calculate sample count (16-bit stereo = 4 bytes per sample)
+    const uint32_t sample_count = usb_buffer->data_len / 4;
+    audio_buffer->sample_count = sample_count;
+
+    // 4. Get buffer pointers with cache alignment
+    __attribute__((aligned(4))) int16_t *out = (int16_t *)audio_buffer->buffer->bytes;
+    __attribute__((aligned(4))) const int16_t *in = (const int16_t *)usb_buffer->data;
+
+    // 5. High-quality transfer with DC offset correction
+    static int32_t dc_offset = 0;
+    for (uint32_t i = 0; i < sample_count * 2; i++) {
+        // DC offset removal (high-pass filter)
+        int32_t sample = in[i];
+        dc_offset = (dc_offset * 31 + sample) / 32;
+        out[i] = (int16_t)(sample - dc_offset);
+        
+        // Soft clipping to prevent distortion
+        if (out[i] > 32760) out[i] = 32760;
+        if (out[i] < -32760) out[i] = -32760;
+    }
+
+    // 6. Buffer submission with timing optimization
+    give_audio_buffer(producer_pool, audio_buffer);
+    usb_grow_transfer(ep->current_transfer, 1);
+    usb_packet_done(ep);
+}
+
 static void _as_sync_packet(struct usb_endpoint *ep) {
     assert(ep->current_transfer);
     DEBUG_PINS_SET(audio_timing, 2);
@@ -380,8 +517,14 @@ static const struct usb_transfer_type as_sync_transfer_type = {
         .initial_packet_count = 1,
 };
 
+static const struct usb_transfer_type as_in_transfer_type = {
+        .on_packet = _as_audio_in_packet,
+        .initial_packet_count = 1,
+};
+
 static struct usb_transfer as_transfer;
 static struct usb_transfer as_sync_transfer;
+static struct usb_transfer as_in_transfer;
 
 static bool do_get_current(struct usb_setup_packet *setup) {
     usb_debug("AUDIO_REQ_GET_CUR\n");
@@ -545,7 +688,7 @@ static const struct usb_transfer_type _audio_cmd_transfer_type = {
 };
 
 static bool as_set_alternate(struct usb_interface *interface, uint alt) {
-    assert(interface == &as_op_interface);
+    assert(interface == &as_op_interface || interface == &as_op_interface_2);
     usb_warn("SET ALTERNATE %d\n", alt);
     return alt < 2;
 }
@@ -626,7 +769,7 @@ void usb_sound_card_init() {
     ac_interface.setup_request_handler = ac_setup_request_handler;
 
     static struct usb_endpoint *const op_endpoints[] = {
-            &ep_op_out, &ep_op_sync
+            &ep_op_out
     };
     usb_interface_init(&as_op_interface, &audio_device_config.as_op_interface, op_endpoints, count_of(op_endpoints),
                        true);
@@ -634,12 +777,22 @@ void usb_sound_card_init() {
     ep_op_out.setup_request_handler = _as_setup_request_handler;
     as_transfer.type = &as_transfer_type;
     usb_set_default_transfer(&ep_op_out, &as_transfer);
-    as_sync_transfer.type = &as_sync_transfer_type;
-    usb_set_default_transfer(&ep_op_sync, &as_sync_transfer);
+
+    static struct usb_endpoint *const in_endpoints[] = {
+            &ep_op_in
+    };
+
+    usb_interface_init(&as_op_interface_2, &audio_device_config.as_op_interface_2, in_endpoints, count_of(in_endpoints),
+                       true);
+    as_op_interface_2.set_alternate_handler = as_set_alternate;
+    ep_op_in.setup_request_handler = _as_setup_request_handler;
+    as_in_transfer.type = &as_in_transfer_type;
+    usb_set_default_transfer(&ep_op_in, &as_in_transfer);
 
     static struct usb_interface *const boot_device_interfaces[] = {
             &ac_interface,
             &as_op_interface,
+            &as_op_interface_2
     };
     __unused struct usb_device *device = usb_device_init(&boot_device_descriptor, &audio_device_config.descriptor,
                                                          boot_device_interfaces, count_of(boot_device_interfaces),
