@@ -1086,8 +1086,10 @@ WM8960::WM8960(i2c_inst_t* i2c, int sample_rate, int bit_depth)
     // ADC
     _codec.set_adc(true);
     _codec.set_input(true);
-    _codec.set_mic_boost_gain(0.0f);
+    _codec.set_mic_boost_gain(1.0f);
     _codec.set_mic_zero_cross(true);
+
+    _codec.set_mic_bias(true);
 
     // DAC
     _codec.set_dac(true);
@@ -1100,8 +1102,8 @@ WM8960::WM8960(i2c_inst_t* i2c, int sample_rate, int bit_depth)
     _codec.set_speaker_zero_cross(true);
 
      // Configure with reduced default gains
-    _codec.set_mic_boost_gain(13.0f); // Moderate boost instead of 0
-    _codec.set_adc_volume(-12.0f); // Start with lower ADC gain
+    _codec.set_mic_boost_gain(30.0f); // Moderate boost instead of 0
+    _codec.set_adc_volume(1.0f); // Start with lower ADC gain
     _codec.set_dac_volume(0.8f); // Moderate DAC output
     
     // Enable DC filters
@@ -1118,6 +1120,7 @@ WM8960::WM8960(i2c_inst_t* i2c, int sample_rate, int bit_depth)
     _codec.set_noise_gate(false);
     _codec.set_input3_output(false); // If not using IN3
     _codec.set_mic_output(false);    // Avoid analog feedback
+    _codec.set_mic(true);
 }
 
 int WM8960::get_sample_rate() const { return _codec.get_sample_rate(); }
