@@ -21,6 +21,9 @@ extern "C" {
 #include "bsp/board_api.h"
 #include "hardware/pio.h"
 #include "pio_blink.pio.h"
+#include <assert.h>
+#include <stdint.h>
+#include <limits.h> // for INT16_MAX / INT16_MIN
 
 // todo forget why this is using core 1 for sound: presumably not necessary
 // todo noop when muted
@@ -75,7 +78,7 @@ static const char *descriptor_strings[] =
 
 #define ENDPOINT_FREQ_CONTROL 1u
 
-static PIO mic_pio = pio1;
+static PIO mic_pio = pio0;
 static uint mic_sm = 0;
 static uint32_t current_mic_sample = 0;
 
@@ -446,30 +449,67 @@ static void _as_audio_packet(struct usb_endpoint *ep) {
 
 static void _as_audio_in_packet(struct usb_endpoint *ep) {
     assert(ep->current_transfer);
-    
+
     struct usb_buffer *usb_buffer = usb_current_in_packet_buffer(ep);
     const uint32_t expected_bytes = AUDIO_MAX_PACKET_SIZE(current_sample_rate);
-    
+
     if (expected_bytes > usb_buffer->data_max) {
         usb_grow_transfer(ep->current_transfer, 1);
         usb_packet_done(ep);
         return;
     }
-    
-    uint32_t mic_sample = pio_sm_get_blocking(mic_pio, mic_sm);
-    int16_t sample = (int16_t)(mic_sample >> 16);
 
-    int16_t *audio_data = (int16_t *)usb_buffer->data;
+    __attribute__((aligned(4))) int16_t *audio_data = (int16_t *)usb_buffer->data;
     uint32_t sample_count = expected_bytes / 2;
-    
+
+    static int32_t dc_offset = 0;
+
+    const float gain = 15.0f;
+    const int16_t gate_threshold = 1000;  // More aggressive than before
+    const uint32_t gate_hold_samples = 500;  // Number of samples to hold gate open after speech
+
+    static uint32_t gate_hold_counter = 0;
+    static bool gate_open = false;
+
     for (uint32_t i = 0; i < sample_count; i++) {
-        audio_data[i] = sample;
+        uint32_t raw_sample = pio_sm_get_blocking(mic_pio, mic_sm);
+        int32_t sample32 = (int32_t)(raw_sample) >> 8;
+        int16_t sample = (int16_t)(sample32 >> 8);
+
+        // DC offset
+        dc_offset = (dc_offset * 31 + sample) / 32;
+        sample -= (int16_t)dc_offset;
+
+        // Apply gain
+        int32_t amplified = (int32_t)(sample * gain);
+
+        // Measure absolute volume
+        int32_t abs_val = amplified > 0 ? amplified : -amplified;
+
+        // Gate logic
+        if (abs_val > gate_threshold) {
+            gate_open = true;
+            gate_hold_counter = gate_hold_samples;
+        } else if (gate_hold_counter > 0) {
+            gate_hold_counter--;
+        } else {
+            gate_open = false;
+        }
+
+        if (!gate_open) amplified = 0;
+
+        // Clip
+        if (amplified > 32760) amplified = 32760;
+        if (amplified < -32760) amplified = -32760;
+
+        audio_data[i] = (int16_t)amplified;
     }
-    
+
     usb_buffer->data_len = expected_bytes;
     usb_grow_transfer(ep->current_transfer, 1);
     usb_packet_done(ep);
 }
+
 
 static void _as_sync_packet(struct usb_endpoint *ep) {
     assert(ep->current_transfer);
@@ -883,7 +923,7 @@ void init_microphone() {
     sm_config_set_sideset_pins(&conf, sck_ws_pins);
     sm_config_set_in_shift(&conf, false, true, 32);
     sm_config_set_fifo_join(&conf, PIO_FIFO_JOIN_RX);
-    sm_config_set_clkdiv_int_frac(&conf, 122, 18);
+    sm_config_set_clkdiv(&conf, 42.0f);
     
     pio_sm_init(mic_pio, mic_sm, offset, &conf);
     pio_sm_set_enabled(mic_pio, mic_sm, true);
