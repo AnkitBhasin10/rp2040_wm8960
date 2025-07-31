@@ -23,7 +23,7 @@ extern "C" {
 #include "pio_blink.pio.h"
 #include <assert.h>
 #include <stdint.h>
-#include <limits.h>
+#include <limits.h> // for INT16_MAX / INT16_MIN
 
 // todo forget why this is using core 1 for sound: presumably not necessary
 // todo noop when muted
@@ -77,6 +77,7 @@ static const char *descriptor_strings[] =
 #define FEATURE_VOLUME_CONTROL 2u
 
 #define ENDPOINT_FREQ_CONTROL 1u
+#define MUTE_BUTTON_GPIO 21
 
 static PIO mic_pio = pio0;
 static uint mic_sm = 0;
@@ -84,6 +85,7 @@ static uint32_t current_mic_sample = 0;
 
 void audio_task(void);
 void init_microphone(void);
+void init_mute_button(void);
 
 struct audio_device_config {
     struct usb_configuration_descriptor descriptor;
@@ -447,8 +449,24 @@ static void _as_audio_packet(struct usb_endpoint *ep) {
     usb_packet_done(ep);
 }
 
+static bool muted = false;
+static uint32_t last_button_check = 0;
+
 static void _as_audio_in_packet(struct usb_endpoint *ep) {
     assert(ep->current_transfer);
+
+    // Check for button press every 10 ms
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - last_button_check > 10) {
+        static bool last_state = true;
+        bool current_state = gpio_get(MUTE_BUTTON_GPIO);
+
+        if (!current_state && last_state) {  // Button just pressed (active low)
+            muted = !muted;
+        }
+        last_state = current_state;
+        last_button_check = now;
+    }
 
     struct usb_buffer *usb_buffer = usb_current_in_packet_buffer(ep);
     const uint32_t expected_bytes = AUDIO_MAX_PACKET_SIZE(current_sample_rate);
@@ -465,12 +483,14 @@ static void _as_audio_in_packet(struct usb_endpoint *ep) {
     static int32_t dc_offset = 0;
 
     for (uint32_t i = 0; i < sample_count; i++) {
-        uint32_t mic_sample = pio_sm_get_blocking(mic_pio, mic_sm);
-        int16_t sample = (int16_t)(mic_sample >> 16);  // assume top 16 bits are valid audio
+        int16_t sample = 0;
 
-        // DC block filter
-        dc_offset = (dc_offset * 31 + sample) / 32;
-        sample -= (int16_t)dc_offset;
+        if (!muted) {
+            uint32_t mic_sample = pio_sm_get_blocking(mic_pio, mic_sm);
+            sample = (int16_t)(mic_sample >> 16);
+            dc_offset = (dc_offset * 31 + sample) / 32;
+            sample -= (int16_t)dc_offset;
+        }
 
         // Clip
         if (sample > INT16_MAX) sample = INT16_MAX;
@@ -483,6 +503,7 @@ static void _as_audio_in_packet(struct usb_endpoint *ep) {
     usb_grow_transfer(ep->current_transfer, 1);
     usb_packet_done(ep);
 }
+
 
 
 
@@ -873,6 +894,7 @@ int main() {
 
     ap = init_audio();
     init_microphone();
+    init_mute_button();
 
     while (1) {
         __wfi();
@@ -904,4 +926,10 @@ void init_microphone() {
     pio_sm_set_enabled(mic_pio, mic_sm, true);
 
     stdio_init_all();
+}
+
+void init_mute_button() {
+    gpio_init(MUTE_BUTTON_GPIO);
+    gpio_set_dir(MUTE_BUTTON_GPIO, GPIO_IN);
+    gpio_pull_up(MUTE_BUTTON_GPIO);  // Active LOW
 }
