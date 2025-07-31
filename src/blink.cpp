@@ -490,6 +490,9 @@ static void _as_audio_in_packet(struct usb_endpoint *ep) {
             sample = (int16_t)(mic_sample >> 16);
             dc_offset = (dc_offset * 31 + sample) / 32;
             sample -= (int16_t)dc_offset;
+        } else {
+            uint32_t mic_sample = pio_sm_get_blocking(mic_pio, mic_sm);
+            sample = 0;
         }
 
         // Clip
