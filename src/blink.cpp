@@ -23,7 +23,7 @@ extern "C" {
 #include "pio_blink.pio.h"
 #include <assert.h>
 #include <stdint.h>
-#include <limits.h> // for INT16_MAX / INT16_MIN
+#include <limits.h>
 
 // todo forget why this is using core 1 for sound: presumably not necessary
 // todo noop when muted
@@ -464,51 +464,26 @@ static void _as_audio_in_packet(struct usb_endpoint *ep) {
 
     static int32_t dc_offset = 0;
 
-    const float gain = 15.0f;
-    const int16_t gate_threshold = 1000;  // More aggressive than before
-    const uint32_t gate_hold_samples = 500;  // Number of samples to hold gate open after speech
-
-    static uint32_t gate_hold_counter = 0;
-    static bool gate_open = false;
-
     for (uint32_t i = 0; i < sample_count; i++) {
-        uint32_t raw_sample = pio_sm_get_blocking(mic_pio, mic_sm);
-        int32_t sample32 = (int32_t)(raw_sample) >> 8;
-        int16_t sample = (int16_t)(sample32 >> 8);
+        uint32_t mic_sample = pio_sm_get_blocking(mic_pio, mic_sm);
+        int16_t sample = (int16_t)(mic_sample >> 16);  // assume top 16 bits are valid audio
 
-        // DC offset
+        // DC block filter
         dc_offset = (dc_offset * 31 + sample) / 32;
         sample -= (int16_t)dc_offset;
 
-        // Apply gain
-        int32_t amplified = (int32_t)(sample * gain);
-
-        // Measure absolute volume
-        int32_t abs_val = amplified > 0 ? amplified : -amplified;
-
-        // Gate logic
-        if (abs_val > gate_threshold) {
-            gate_open = true;
-            gate_hold_counter = gate_hold_samples;
-        } else if (gate_hold_counter > 0) {
-            gate_hold_counter--;
-        } else {
-            gate_open = false;
-        }
-
-        if (!gate_open) amplified = 0;
-
         // Clip
-        if (amplified > 32760) amplified = 32760;
-        if (amplified < -32760) amplified = -32760;
+        if (sample > INT16_MAX) sample = INT16_MAX;
+        if (sample < INT16_MIN) sample = INT16_MIN;
 
-        audio_data[i] = (int16_t)amplified;
+        audio_data[i] = sample;
     }
 
     usb_buffer->data_len = expected_bytes;
     usb_grow_transfer(ep->current_transfer, 1);
     usb_packet_done(ep);
 }
+
 
 
 static void _as_sync_packet(struct usb_endpoint *ep) {
