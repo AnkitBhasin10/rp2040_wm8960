@@ -19,6 +19,8 @@ extern "C" {
 #include "AudioClassCommon.h"
 #include "wm8960/wm8960.h"
 #include "bsp/board_api.h"
+#include "hardware/pio.h"
+#include "pio_blink.pio.h"
 
 // todo forget why this is using core 1 for sound: presumably not necessary
 // todo noop when muted
@@ -73,8 +75,12 @@ static const char *descriptor_strings[] =
 
 #define ENDPOINT_FREQ_CONTROL 1u
 
+static PIO mic_pio = pio1;
+static uint mic_sm = 0;
+static uint32_t current_mic_sample = 0;
+
 void audio_task(void);
-inline int16_t soft_limit(int16_t sample);
+void init_microphone(void);
 
 struct audio_device_config {
     struct usb_configuration_descriptor descriptor;
@@ -440,23 +446,27 @@ static void _as_audio_packet(struct usb_endpoint *ep) {
 
 static void _as_audio_in_packet(struct usb_endpoint *ep) {
     assert(ep->current_transfer);
-
+    
     struct usb_buffer *usb_buffer = usb_current_in_packet_buffer(ep);
-    
     const uint32_t expected_bytes = AUDIO_MAX_PACKET_SIZE(current_sample_rate);
-    const uint32_t sample_count = expected_bytes / 2;
     
-    // Ensure we don't exceed buffer size
     if (expected_bytes > usb_buffer->data_max) {
         usb_grow_transfer(ep->current_transfer, 1);
         usb_packet_done(ep);
         return;
     }
     
-    // Fill with silence (zeros) - this makes the recorder think there's a working mic
-    memset(usb_buffer->data, 0, expected_bytes);
-    usb_buffer->data_len = expected_bytes;
+    uint32_t mic_sample = pio_sm_get_blocking(mic_pio, mic_sm);
+    int16_t sample = (int16_t)(mic_sample >> 16);
+
+    int16_t *audio_data = (int16_t *)usb_buffer->data;
+    uint32_t sample_count = expected_bytes / 2;
     
+    for (uint32_t i = 0; i < sample_count; i++) {
+        audio_data[i] = sample;
+    }
+    
+    usb_buffer->data_len = expected_bytes;
     usb_grow_transfer(ep->current_transfer, 1);
     usb_packet_done(ep);
 }
@@ -846,81 +856,37 @@ int main() {
     }
 #endif
 
-    i2c_init(i2c0, current_sample_rate);
-    gpio_set_function(PIN_I2C_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(PIN_I2C_SDA);
-    gpio_pull_up(PIN_I2C_SCL);
-
-    // Initialize codec with desired sample rate and bit depth
-    codec = new WM8960(i2c0, current_sample_rate, 16);
-    
-    // Configure audio paths and volumes
-    codec -> set_volume(INITIAL_VOLUME);
-    codec -> set_headphone(INITIAL_VOLUME);
-    codec -> set_speaker(INITIAL_VOLUME);
-    codec -> set_gain(-10.0f);
-
     ap = init_audio();
+    init_microphone();
 
     while (1) {
         __wfi();
-        audio_task();
     }
 }
 
-inline int16_t soft_limit(int16_t sample) {
-    const int32_t x = sample;
-    if (x > 28000) return 28000 + ((x - 28000) >> 2);
-    if (x < -28000) return -28000 + ((x + 28000) >> 2);
-    return sample;
-}
 
-void audio_task(void) {
-    static uint32_t last_run = 0;
+void init_microphone() {
+    uint sd_pin = 20;
+    uint sck_ws_pins = 18;
+    uint offset = pio_add_program(mic_pio, &i2s_mic_program);
+    mic_sm = pio_claim_unused_sm(mic_pio, true);
+    
+    pio_gpio_init(mic_pio, sd_pin);
+    pio_gpio_init(mic_pio, sck_ws_pins);
+    pio_gpio_init(mic_pio, sck_ws_pins + 1);
+    
+    pio_sm_set_consecutive_pindirs(mic_pio, mic_sm, sd_pin, 1, false);
+    pio_sm_set_consecutive_pindirs(mic_pio, mic_sm, sck_ws_pins, 2, true);
+    
+    pio_sm_config conf = i2s_mic_program_get_default_config(offset);
+    sm_config_set_in_pins(&conf, sd_pin);
+    sm_config_set_sideset_pins(&conf, sck_ws_pins);
+    sm_config_set_in_shift(&conf, false, true, 32);
+    sm_config_set_fifo_join(&conf, PIO_FIFO_JOIN_RX);
+    sm_config_set_clkdiv_int_frac(&conf, 122, 18);
+    
+    pio_sm_init(mic_pio, mic_sm, offset, &conf);
+    pio_sm_set_enabled(mic_pio, mic_sm, true);
 
-    uint32_t now = board_millis();
-    if (now - last_run < 1) return;
-    last_run = now;
-
-    audio_buffer_t *buffer = take_audio_buffer(ap, false);
-    if (!buffer) return;
-
-    uint32_t bytes_needed = (current_sample_rate / 1000) *
-                            CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX *
-                            CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX;
-
-    uint32_t bytes_read = tud_audio_read((uint8_t*)buffer->buffer->bytes, bytes_needed);
-    uint32_t samples_read = bytes_read / (CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX *
-                                          CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX);
-
-    if (samples_read > 0) {
-        int16_t* samples = (int16_t*)buffer->buffer->bytes;
-
-        #define PEAK_LIMITER_GAIN 0.8f
-
-        // If mono, convert to stereo *after* processing
-        if (CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX == 1) {
-            for (int i = samples_read - 1; i >= 0; i--) {
-                // Apply gain and soft limit before expanding
-                int16_t mono = (int16_t)((int32_t)samples[i] * PEAK_LIMITER_GAIN);
-                mono = soft_limit(mono);
-                samples[2 * i]     = mono;
-                samples[2 * i + 1] = mono;
-            }
-            samples_read *= 2;
-        } else {
-            // Stereo: apply gain and soft limit directly
-            for (int i = 0; i < samples_read * 2; i++) {
-                int32_t val = (int32_t)samples[i] * PEAK_LIMITER_GAIN;
-                samples[i] = soft_limit((int16_t)val);
-            }
-        }
-
-        buffer->sample_count = samples_read;
-    } else {
-        buffer->sample_count = 0;
-    }
-
-    give_audio_buffer(ap, buffer);
+    stdio_init_all();
 }

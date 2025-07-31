@@ -1,20 +1,33 @@
-.program pio_blink   
+.program i2s_mic
+.side_set 2
 
-mainloop:
-    set pins,1 [31];
-    nop        [31];
-    nop        [31];
-    nop        [31];
-    nop        [31];
-    nop        [31];
-    nop        [31];
-    nop        [31];
-    set pins,0 [31];
-    nop        [31];
-    nop        [31];
-    nop        [31];
-    nop        [31];
-    nop        [31];
-    nop        [31];
-    nop        [31];
-    jmp mainloop;    
+; Main loop
+.wrap_target
+    ; Left channel sampling
+    nop                side 1      ; Initial sync
+    set x, 23          side 0      ; Prepare for 24 bits (23 countdown)
+    
+left_channel:
+    in pins, 1          side 1      ; Sample 1 bit
+    jmp x--, left_channel side 0    ; Loop for all bits
+    
+    ; Padding between channels
+    in null, 8          side 1      ; Discard 8 bits (assuming 32-bit frames)
+    set x, 4            side 0      ; Prepare for 5 cycles (4 countdown)
+    
+padding:
+    nop                side 1      ; Wait cycle
+    jmp x--, padding    side 0     ; Loop for padding
+    
+    ; Right channel sampling
+    nop                side 1      ; Sync before right channel
+    set x, 30           side 2     ; Prepare for 31 cycles (30 countdown)
+    
+right_channel:
+    nop                side 3      ; Wait cycle
+    jmp x--, right_channel side 2  ; Loop for right channel timing
+    
+    ; Final sync
+    nop                side 3      ; Final wait
+    nop                side 0      ; Reset side-set for next iteration
+.wrap
