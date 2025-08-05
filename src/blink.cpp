@@ -875,8 +875,6 @@ audio_buffer_pool_t *init_audio() {
     return producer_pool;
 }
 
-WM8960* codec = nullptr;
-
 int main() {
     board_init();
     set_sys_clock_khz(256000, true);
