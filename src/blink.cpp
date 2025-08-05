@@ -846,81 +846,25 @@ int main() {
     }
 #endif
 
-    i2c_init(i2c0, current_sample_rate);
-    gpio_set_function(PIN_I2C_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(PIN_I2C_SDA);
-    gpio_pull_up(PIN_I2C_SCL);
+    // i2c_init(i2c0, current_sample_rate);
+    // gpio_set_function(PIN_I2C_SDA, GPIO_FUNC_I2C);
+    // gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C);
+    // gpio_pull_up(PIN_I2C_SDA);
+    // gpio_pull_up(PIN_I2C_SCL);
 
-    // Initialize codec with desired sample rate and bit depth
-    codec = new WM8960(i2c0, current_sample_rate, 16);
+    // // Initialize codec with desired sample rate and bit depth
+    // codec = new WM8960(i2c0, current_sample_rate, 16);
     
-    // Configure audio paths and volumes
-    codec -> set_volume(INITIAL_VOLUME);
-    codec -> set_headphone(INITIAL_VOLUME);
-    codec -> set_speaker(INITIAL_VOLUME);
-    codec -> set_gain(-10.0f);
+    // // Configure audio paths and volumes
+    // codec -> set_volume(INITIAL_VOLUME);
+    // codec -> set_headphone(INITIAL_VOLUME);
+    // codec -> set_speaker(INITIAL_VOLUME);
+    // codec -> set_gain(-10.0f);
 
     ap = init_audio();
 
     while (1) {
         __wfi();
-        audio_task();
+        
     }
-}
-
-inline int16_t soft_limit(int16_t sample) {
-    const int32_t x = sample;
-    if (x > 28000) return 28000 + ((x - 28000) >> 2);
-    if (x < -28000) return -28000 + ((x + 28000) >> 2);
-    return sample;
-}
-
-void audio_task(void) {
-    static uint32_t last_run = 0;
-
-    uint32_t now = board_millis();
-    if (now - last_run < 1) return;
-    last_run = now;
-
-    audio_buffer_t *buffer = take_audio_buffer(ap, false);
-    if (!buffer) return;
-
-    uint32_t bytes_needed = (current_sample_rate / 1000) *
-                            CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX *
-                            CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX;
-
-    uint32_t bytes_read = tud_audio_read((uint8_t*)buffer->buffer->bytes, bytes_needed);
-    uint32_t samples_read = bytes_read / (CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX *
-                                          CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX);
-
-    if (samples_read > 0) {
-        int16_t* samples = (int16_t*)buffer->buffer->bytes;
-
-        #define PEAK_LIMITER_GAIN 0.8f
-
-        // If mono, convert to stereo *after* processing
-        if (CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX == 1) {
-            for (int i = samples_read - 1; i >= 0; i--) {
-                // Apply gain and soft limit before expanding
-                int16_t mono = (int16_t)((int32_t)samples[i] * PEAK_LIMITER_GAIN);
-                mono = soft_limit(mono);
-                samples[2 * i]     = mono;
-                samples[2 * i + 1] = mono;
-            }
-            samples_read *= 2;
-        } else {
-            // Stereo: apply gain and soft limit directly
-            for (int i = 0; i < samples_read * 2; i++) {
-                int32_t val = (int32_t)samples[i] * PEAK_LIMITER_GAIN;
-                samples[i] = soft_limit((int16_t)val);
-            }
-        }
-
-        buffer->sample_count = samples_read;
-    } else {
-        buffer->sample_count = 0;
-    }
-
-    give_audio_buffer(ap, buffer);
 }
