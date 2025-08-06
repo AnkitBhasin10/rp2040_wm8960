@@ -78,6 +78,13 @@ static const char *descriptor_strings[] =
 
 #define ENDPOINT_FREQ_CONTROL 1u
 #define MUTE_BUTTON_GPIO 21
+#define MIC_SAMPLE_RATE_HZ 48000
+#define USB_FRAME_TIME_US 1000
+#define MIC_SAMPLES_PER_FRAME (MIC_SAMPLE_RATE_HZ / 1000)
+
+static int16_t mic_frame_buffer[MIC_SAMPLES_PER_FRAME];
+volatile bool mic_frame_ready = false;
+
 
 static PIO mic_pio = pio0;
 static uint mic_sm = 0;
@@ -111,6 +118,7 @@ struct audio_device_config {
         struct usb_endpoint_descriptor_long core;
         USB_Audio_StdDescriptor_StreamEndpoint_Spc_t audio;
     } ep1;
+    struct usb_endpoint_descriptor_long ep2;
     struct usb_interface_descriptor as_zero_interface_2;
     struct usb_interface_descriptor as_op_interface_2;
     struct __attribute__((packed)) {
@@ -123,7 +131,7 @@ struct audio_device_config {
     struct __attribute__((packed)) {
         struct usb_endpoint_descriptor_long core;
         USB_Audio_StdDescriptor_StreamEndpoint_Spc_t audio;
-    } ep2;
+    } ep3;
 };
 
 static const struct audio_device_config audio_device_config = {
@@ -229,7 +237,7 @@ static const struct audio_device_config audio_device_config = {
                 .bDescriptorType    = DTYPE_Interface,
                 .bInterfaceNumber   = 0x01,
                 .bAlternateSetting  = 0x01,
-                .bNumEndpoints      = 0x01,
+                .bNumEndpoints      = 0x02,
                 .bInterfaceClass    = AUDIO_CSCP_AudioClass,
                 .bInterfaceSubClass = AUDIO_CSCP_AudioStreamingSubclass,
                 .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
@@ -269,7 +277,7 @@ static const struct audio_device_config audio_device_config = {
                         .wMaxPacketSize   = AUDIO_MAX_PACKET_SIZE(current_sample_rate),
                         .bInterval        = 1,
                         .bRefresh         = 0,
-                        .bSyncAddr        = 0,
+                        .bSyncAddr        = 0x83 | 0x80,
                 },
                 .audio = {
                         .bLength = sizeof(audio_device_config.ep1.audio),
@@ -279,6 +287,16 @@ static const struct audio_device_config audio_device_config = {
                         .bLockDelayUnits = 0,
                         .wLockDelay = 0,
                 }
+        },
+        .ep2 = {
+                .bLength          = sizeof(audio_device_config.ep2),
+                .bDescriptorType  = 0x05,
+                .bEndpointAddress = 0x83 | 0x80,
+                .bmAttributes     = 0x11,
+                .wMaxPacketSize   = 3,
+                .bInterval        = 0x01,
+                .bRefresh         = 2,
+                .bSyncAddr        = 0,
         },
         .as_zero_interface_2 = {
                 .bLength            = sizeof(audio_device_config.as_zero_interface_2),
@@ -327,9 +345,9 @@ static const struct audio_device_config audio_device_config = {
                         },
                 },
         },
-        .ep2 = {
+        .ep3 = {
                 .core = {
-                        .bLength          = sizeof(audio_device_config.ep2.core),
+                        .bLength          = sizeof(audio_device_config.ep3.core),
                         .bDescriptorType  = DTYPE_Endpoint,
                         .bEndpointAddress = AUDIO_IN_ENDPOINT,
                         .bmAttributes     = 5,
@@ -339,7 +357,7 @@ static const struct audio_device_config audio_device_config = {
                         .bSyncAddr        = 0,
                 },
                 .audio = {
-                        .bLength = sizeof(audio_device_config.ep2.audio),
+                        .bLength = sizeof(audio_device_config.ep3.audio),
                         .bDescriptorType = AUDIO_DTYPE_CSEndpoint,
                         .bDescriptorSubtype = AUDIO_DSUBTYPE_CSEndpoint_General,
                         .bmAttributes = 0,
@@ -391,7 +409,7 @@ static struct {
 static struct audio_buffer_pool *producer_pool;
 
 #if USB_FEEDBACK
-#define BUFFER_NUM 16 // number of buffer
+#define BUFFER_NUM 32 // number of buffer
 
 //for USB-audio rate feedback, number of vacant buffers is used
 static int countFreeBuffers() {
@@ -454,61 +472,30 @@ static uint32_t last_button_check = 0;
 
 static void _as_audio_in_packet(struct usb_endpoint *ep) {
     assert(ep->current_transfer);
-
-    // Check for button press every 10 ms
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (now - last_button_check > 10) {
-        static bool last_state = true;
-        bool current_state = gpio_get(MUTE_BUTTON_GPIO);
-
-        if (!current_state && last_state) {  // Button just pressed (active low)
-            muted = !muted;
-        }
-        last_state = current_state;
-        last_button_check = now;
-    }
-
     struct usb_buffer *usb_buffer = usb_current_in_packet_buffer(ep);
-    const uint32_t expected_bytes = AUDIO_MAX_PACKET_SIZE(current_sample_rate);
 
-    if (expected_bytes > usb_buffer->data_max) {
+    if (!mic_frame_ready || !usb_buffer) {
         usb_grow_transfer(ep->current_transfer, 1);
         usb_packet_done(ep);
         return;
     }
 
-    __attribute__((aligned(4))) int16_t *audio_data = (int16_t *)usb_buffer->data;
-    uint32_t sample_count = expected_bytes / 2;
+    mic_frame_ready = false;
 
     static int32_t dc_offset = 0;
+    int16_t *audio_data = (int16_t *)usb_buffer->data;
 
-    for (uint32_t i = 0; i < sample_count; i++) {
-        int16_t sample = 0;
-
-        if (!muted) {
-            uint32_t mic_sample = pio_sm_get_blocking(mic_pio, mic_sm);
-            sample = (int16_t)(mic_sample >> 16);
-            dc_offset = (dc_offset * 31 + sample) / 32;
-            sample -= (int16_t)dc_offset;
-        } else {
-            uint32_t mic_sample = pio_sm_get_blocking(mic_pio, mic_sm);
-            sample = 0;
-        }
-
-        // Clip
-        if (sample > INT16_MAX) sample = INT16_MAX;
-        if (sample < INT16_MIN) sample = INT16_MIN;
-
-        audio_data[i] = sample;
+    for (uint32_t i = 0; i < MIC_SAMPLES_PER_FRAME; i++) {
+        uint32_t sample = pio_sm_get_blocking(mic_pio, mic_sm);
+        int16_t s = (int16_t)(sample >> 16);
+        dc_offset = (dc_offset * 31 + s) / 32;
+        audio_data[i] = s - (int16_t)dc_offset;
     }
 
-    usb_buffer->data_len = expected_bytes;
+    usb_buffer->data_len = MIC_SAMPLES_PER_FRAME  * sizeof(int16_t);
     usb_grow_transfer(ep->current_transfer, 1);
     usb_packet_done(ep);
 }
-
-
-
 
 static void _as_sync_packet(struct usb_endpoint *ep) {
     assert(ep->current_transfer);
@@ -518,20 +505,19 @@ static void _as_sync_packet(struct usb_endpoint *ep) {
     assert(buffer->data_max >= 3);
     buffer->data_len = 3;
 
-#if USB_FEEDBACK
+    #if USB_FEEDBACK
     // calc rate adjustment value between -40 to 40
     int feedbackvalue = (countFreeBuffers() - BUFFER_NUM / 2) * (2 * 40 / BUFFER_NUM);
     uint feedback = ((audio_state.freq + feedbackvalue) << 14u) / 1000u;
-#else
-    // todo lie thru our teeth for now
-    uint feedback = (audio_state.freq << 14u) / 1000u;
-#endif
+    #else
+        // todo lie thru our teeth for now
+        uint feedback = (audio_state.freq << 14u) / 1000u;
+    #endif
 
     buffer->data[0] = feedback;
     buffer->data[1] = feedback >> 8u;
     buffer->data[2] = feedback >> 16u;
 
-    // keep on truckin'
     usb_grow_transfer(ep->current_transfer, 1);
     usb_packet_done(ep);
 }
@@ -798,7 +784,7 @@ void usb_sound_card_init() {
     ac_interface.setup_request_handler = ac_setup_request_handler;
 
     static struct usb_endpoint *const op_endpoints[] = {
-            &ep_op_out
+            &ep_op_out, &ep_op_sync
     };
     usb_interface_init(&as_op_interface, &audio_device_config.as_op_interface, op_endpoints, count_of(op_endpoints),
                        true);
@@ -806,6 +792,8 @@ void usb_sound_card_init() {
     ep_op_out.setup_request_handler = _as_setup_request_handler;
     as_transfer.type = &as_transfer_type;
     usb_set_default_transfer(&ep_op_out, &as_transfer);
+    as_sync_transfer.type = &as_sync_transfer_type;
+    usb_set_default_transfer(&ep_op_sync, &as_sync_transfer);
 
     static struct usb_endpoint *const in_endpoints[] = {
             &ep_op_in
@@ -875,6 +863,11 @@ audio_buffer_pool_t *init_audio() {
     return producer_pool;
 }
 
+bool mic_timer_callback(struct repeating_timer *t) {
+    mic_frame_ready = true;
+    return true;
+}
+
 int main() {
     board_init();
     set_sys_clock_khz(256000, true);
@@ -921,12 +914,16 @@ void init_microphone() {
     sm_config_set_sideset_pins(&conf, sck_ws_pins);
     sm_config_set_in_shift(&conf, false, true, 32);
     sm_config_set_fifo_join(&conf, PIO_FIFO_JOIN_RX);
-    sm_config_set_clkdiv(&conf, 42.0f);
+    sm_config_set_clkdiv(&conf, 40.69f);
     
     pio_sm_init(mic_pio, mic_sm, offset, &conf);
     pio_sm_set_enabled(mic_pio, mic_sm, true);
 
     stdio_init_all();
+
+    static struct repeating_timer mic_timer;
+    add_repeating_timer_us(-USB_FRAME_TIME_US, mic_timer_callback, NULL, &mic_timer);
+
 }
 
 void init_mute_button() {
