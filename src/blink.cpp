@@ -17,7 +17,6 @@ extern "C" {
 #include "pico/multicore.h"
 #include "hardware/clocks.h"
 #include "AudioClassCommon.h"
-#include "wm8960/wm8960.h"
 #include "bsp/board_api.h"
 
 // todo forget why this is using core 1 for sound: presumably not necessary
@@ -29,9 +28,9 @@ extern "C" {
 
 // connected pins from RPi to DAC
 #undef PICO_AUDIO_I2S_DATA_PIN
-#define PICO_AUDIO_I2S_DATA_PIN 9
+#define PICO_AUDIO_I2S_DATA_PIN 22
 #undef PICO_AUDIO_I2S_CLOCK_PIN_BASE
-#define PICO_AUDIO_I2S_CLOCK_PIN_BASE 10
+#define PICO_AUDIO_I2S_CLOCK_PIN_BASE 26
 ////////////////////////////////////////
 
 #define PIN_I2C_SDA 0
@@ -693,8 +692,6 @@ audio_buffer_pool_t *init_audio() {
     return producer_pool;
 }
 
-WM8960* codec = nullptr;
-
 int main() {
     board_init();
     set_sys_clock_khz(256000, true);
@@ -713,20 +710,10 @@ int main() {
     }
 #endif
 
-    i2c_init(i2c0, current_sample_rate);
     gpio_set_function(PIN_I2C_SDA, GPIO_FUNC_I2C);
     gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(PIN_I2C_SDA);
     gpio_pull_up(PIN_I2C_SCL);
-
-    // Initialize codec with desired sample rate and bit depth
-    codec = new WM8960(i2c0, current_sample_rate, 16);
-    
-    // Configure audio paths and volumes
-    codec -> set_volume(INITIAL_VOLUME);
-    codec -> set_headphone(INITIAL_VOLUME);
-    codec -> set_speaker(INITIAL_VOLUME);
-    codec -> set_gain(-10.0f);
 
     ap = init_audio();
 

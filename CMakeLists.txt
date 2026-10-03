@@ -21,11 +21,17 @@ include(CMakePrintHelpers)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Use your own TinyUSB path
-set(PICO_TINYUSB_PATH "${CMAKE_CURRENT_LIST_DIR}/lib/tinyusb")
+set(PICO_TINYUSB_PATH "${PICO_SDK_PATH}/lib/tinyusb")
 
 # Initialize Pico SDK (must be after TinyUSB flags but before project)
-include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
-include($ENV{PICO_EXTRAS_PATH}/external/pico_extras_import.cmake)
+include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+if(NOT PICO_EXTRAS_PATH AND DEFINED ENV{PICO_EXTRAS_PATH})
+  set(PICO_EXTRAS_PATH "$ENV{PICO_EXTRAS_PATH}")
+endif()
+if(NOT PICO_EXTRAS_PATH)
+  message(FATAL_ERROR "Set PICO_EXTRAS_PATH to the pico-extras source directory")
+endif()
+include(${PICO_EXTRAS_PATH}/external/pico_extras_import.cmake)
 
 if (PICO_SDK_VERSION_STRING VERSION_LESS "2.1.1")
   message(FATAL_ERROR "Raspberry Pi Pico SDK version 2.1.1 (or later) required. Your version is ${PICO_SDK_VERSION_STRING}")
@@ -45,12 +51,6 @@ pico_sdk_init()
 # )
 
 # FetchContent_MakeAvailable(tinyusb)
-
-# === Libraries ===
-add_library(wm8960 
-  wm8960/sparkfun_wm8960.cpp
-  wm8960/wm8960.cpp
-)
 
 # === Main executable ===
 add_executable(blinkPio 
@@ -76,9 +76,6 @@ target_compile_definitions(blinkPio PRIVATE
             PICO_AUDIO_I2S_MONO_INPUT=0
     )
 
-# === PIO Header ===
-pico_generate_pio_header(blinkPio ${CMAKE_CURRENT_LIST_DIR}/pio_blink.pio)
-
 # === Link libraries ===
 target_link_libraries(blinkPio 
   tinyusb_device
@@ -88,19 +85,9 @@ target_link_libraries(blinkPio
   hardware_gpio
   hardware_clocks
   hardware_i2c
-  wm8960
   pico_audio_i2s
   usb_device
   pico_multicore
-)
-
-# === Link WM8960 separately ===
-target_link_libraries(wm8960 
-  pico_stdlib
-  hardware_pio
-  hardware_gpio
-  hardware_clocks
-  hardware_i2c
 )
 
 # === Include paths ===
